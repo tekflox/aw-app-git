@@ -9,12 +9,12 @@ secret store, never stored in plain config).
 
 ## Status
 
-The framework runtime (Phase 1 — plugin loader, hot routes, `AppContext`)
-isn't built yet. This app is **scaffolded and tested standalone**, ready to
-plug in once Phase 1 ships (`runtime.entrypoint` in `aw-app.json` already
-points at `git_app.plugin:GitAppPlugin`). It plugs in for real around
-Phase 4 (commands, services, app DB, config/secrets split) — that's where
-`commands:install` and `secrets:own` get enforced by a real `AppContext`.
+**Plugged into the real framework (F4).** `GitAppPlugin.activate(ctx)` now
+drives the gated `ctx` facades — `ctx.commands.install_system_cli(...)`
+installs git + gh (journaled, reverted on uninstall), `ctx.secrets` stores/
+reads the gh token via the workspace-side secure store, and `ctx.routes`
+mounts a small settings sub-app (`POST /api/apps/git/settings/token`,
+`GET /api/apps/git/status`). No raw shell in the plugin path anymore.
 
 ## Layout
 
@@ -27,16 +27,16 @@ Phase 4 (commands, services, app DB, config/secrets split) — that's where
   /etc/os-release` → Debian 13 trixie). `gh` installs via GitHub's
   official apt repo (signed keyring + `sources.list.d` entry).
 - `scripts/uninstall.sh` — reverses both (apt purge + repo file cleanup).
-- `git_app/plugin.py` — `GitAppPlugin(Plugin)` entrypoint; `activate()`
-  installs both CLIs and logs `gh` in if a token secret is already
-  granted, `deactivate()` uninstalls.
+- `git_app/plugin.py` — `GitAppPlugin` entrypoint; `activate(ctx)` installs
+  git + gh via `ctx.commands`, logs `gh` in from the `ctx.secrets` token if
+  present, and mounts the settings sub-app via `ctx.routes`. Revert is driven
+  by the framework's journal reverse-replay (runs `scripts/uninstall.sh`).
 - `git_app/installer.py` — runs the install/uninstall scripts as
-  subprocesses; used by both the plugin and the standalone test.
+  subprocesses; used by the standalone test (the framework path runs the
+  scripts through `ctx.commands` directly).
 - `git_app/gh_auth.py` — `login_with_token()` (pipes the token on stdin,
   never argv/env/disk), `login_web()` (interactive device-code flow),
   `status()`.
-- `git_app/_plugin_stub.py` — local stand-in for `aw_workspace.apps.Plugin`
-  until Phase 1 exists; delete and import from the real module once it does.
 - `windows/main.json` — declarative settings/login window (status +
   auth-method form + login button), wired to `/api/apps/git/status` and
   `/api/apps/git/login` per the manifest's `contributes.routes`.
@@ -65,6 +65,6 @@ Phase 4 (commands, services, app DB, config/secrets split) — that's where
 
 - No install into the production workspace — Frederico installs manually
   after reviewing this.
-- No real `AppContext`/`Plugin` runtime — `_plugin_stub.py` is a shim.
 - No frontend settings UI — `windows/main.json` is the declarative spec
-  the future settings UI will render; nothing renders it yet.
+  the future settings UI (F5) will render; the backend token round-trip
+  works today via `POST /api/apps/git/settings/token`.
