@@ -11,9 +11,23 @@
     {
       "id": "device-login",
       "widgets": [
-        { "type": "markdown", "value": "### Sign in with GitHub\nClick to get a one-time code, open github.com/login/device, enter it there, then click **Check login status** — no token to paste." },
-        { "type": "button", "label": "Sign in with GitHub", "action": { "call": "POST /api/apps/git/device/start" } },
-        { "type": "button", "label": "Check login status", "action": { "call": "POST /api/apps/git/device/poll" } }
+        { "type": "markdown", "value": "### Sign in with GitHub\nClick to get a one-time code, then open github.com/login/device and enter it there — login is detected automatically, no need to click anything else." },
+        {
+          "type": "button",
+          "label": "Sign in with GitHub",
+          "action": {
+            "call": "POST /api/apps/git/device/start",
+            "poll": {
+              "call": "POST /api/apps/git/device/poll",
+              "interval_ms": 3000,
+              "timeout_ms": 900000,
+              "done_field": "status",
+              "done_values": ["success", "expired_token", "access_denied", "error"],
+              "pending_text": "Waiting for authorization on github.com/login/device…",
+              "timeout_text": "Timed out waiting for authorization — click Sign in with GitHub again."
+            }
+          }
+        }
       ]
     },
     {
