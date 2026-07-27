@@ -71,6 +71,38 @@ class GitAppPlugin:
             except gh_auth.GhAuthError as e:
                 return {"ok": True, "logged_in": False, "error": str(e)}
 
+        @api.post("/settings")
+        async def save_settings(data: dict = Body(...)):
+            """Generic config-window submit (the framework's Apps view posts the
+            whole ``config_schema`` object here). Routes the ``x-secret`` token to
+            the secret store, applies git identity, and logs gh in. Fields are all
+            optional so a partial save (e.g. only the token) works."""
+            result: dict = {"ok": True}
+            token = data.get("github_token", "")
+            if token:
+                ctx.secrets.write("github_token", token)
+                try:
+                    gh_auth.login_with_token(token)
+                    result["logged_in"] = True
+                except gh_auth.GhAuthError as e:
+                    result["logged_in"] = False
+                    result["error"] = str(e)
+            elif data.get("auth_method") == "web":
+                try:
+                    result["web_login"] = gh_auth.login_web()
+                except gh_auth.GhAuthError as e:
+                    result["error"] = str(e)
+            name = (data.get("git_user_name") or "").strip()
+            email = (data.get("git_user_email") or "").strip()
+            if name or email:
+                import subprocess
+                if name:
+                    subprocess.run(["git", "config", "--global", "user.name", name], check=False)
+                if email:
+                    subprocess.run(["git", "config", "--global", "user.email", email], check=False)
+                result["identity"] = {"name": name, "email": email}
+            return result
+
         @api.get("/status")
         async def status():
             has_token = "github_token" in ctx.secrets.keys()
