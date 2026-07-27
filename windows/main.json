@@ -9,8 +9,17 @@
       ]
     },
     {
+      "id": "device-login",
+      "widgets": [
+        { "type": "markdown", "value": "### Sign in with GitHub\nClick to get a one-time code, open github.com/login/device, enter it there, then click **Check login status** — no token to paste." },
+        { "type": "button", "label": "Sign in with GitHub", "action": { "call": "POST /api/apps/git/device/start" } },
+        { "type": "button", "label": "Check login status", "action": { "call": "POST /api/apps/git/device/poll" } }
+      ]
+    },
+    {
       "id": "login",
       "widgets": [
+        { "type": "markdown", "value": "### Alternative: paste a token\nOnly needed if the OAuth Device Flow above isn't configured." },
         { "type": "form", "id": "login_form", "fields": ["auth_method", "github_token"] },
         { "type": "button", "label": "Log in", "action": { "call": "POST /api/apps/git/login" } }
       ]

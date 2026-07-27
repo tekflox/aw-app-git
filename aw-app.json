@@ -9,7 +9,7 @@
   "runtime": {
     "python": ">=3.11",
     "entrypoint": "git_app.plugin:GitAppPlugin",
-    "pip_requires": []
+    "pip_requires": ["httpx>=0.24"]
   },
 
   "permissions": [
@@ -43,9 +43,13 @@
     "properties": {
       "auth_method": {
         "type": "string",
-        "enum": ["token", "web"],
-        "default": "token",
-        "description": "How to log into gh: paste a personal access token, or run the interactive `gh auth login` web flow."
+        "enum": ["token", "web", "device"],
+        "default": "device",
+        "description": "How to log into gh: OAuth Device Flow (Sign in with GitHub, no token needed), paste a personal access token, or run the interactive `gh auth login` web flow (TUI only, not usable from the web UI)."
+      },
+      "oauth_client_id": {
+        "type": "string",
+        "description": "GitHub OAuth App client_id used for the Device Flow login (public value, device flow needs no client_secret; the OAuth App must have Device Flow enabled). Falls back to the AW_APP_GIT_OAUTH_CLIENT_ID env var when unset."
       },
       "github_token": {
         "type": "string",
