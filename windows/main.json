@@ -1,0 +1,19 @@
+{
+  "layout": "stack",
+  "regions": [
+    {
+      "id": "status",
+      "widgets": [
+        { "type": "markdown", "text": "## Git & GitHub CLI" },
+        { "type": "text", "id": "gh_status", "bind": "GET /api/apps/git/status" }
+      ]
+    },
+    {
+      "id": "login",
+      "widgets": [
+        { "type": "form", "id": "login_form", "fields": ["auth_method", "github_token"] },
+        { "type": "button", "label": "Log in", "action": { "call": "POST /api/apps/git/login" } }
+      ]
+    }
+  ]
+}
