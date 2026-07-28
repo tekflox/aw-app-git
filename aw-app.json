@@ -2,18 +2,22 @@
   "manifest_version": 1,
   "id": "git",
   "name": "Git + GitHub CLI",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, and provides a settings panel for gh login (token stored in the zero-knowledge secret store).",
   "tier": "inprocess",
   "publisher": "TekFlox",
-  "resource_estimate": { "cpu": "low", "memory": "-", "disk": "~60 MB" },
-
+  "resource_estimate": {
+    "cpu": "low",
+    "memory": "-",
+    "disk": "~60 MB"
+  },
   "runtime": {
     "python": ">=3.11",
     "entrypoint": "git_app.plugin:GitAppPlugin",
-    "pip_requires": ["httpx>=0.24"]
+    "pip_requires": [
+      "httpx>=0.24"
+    ]
   },
-
   "permissions": [
     "commands:install",
     "routes:register",
@@ -23,43 +27,71 @@
     "watchdog:tasks",
     "notifications:send"
   ],
-
   "contributes": {
-    "routes": [{ "prefix": "/api/apps/git" }],
+    "routes": [
+      {
+        "prefix": "/api/apps/git"
+      }
+    ],
     "system_clis": [
-      { "name": "git", "installer": "scripts/install_git.sh", "version": ">=2.30" },
-      { "name": "gh", "installer": "scripts/install_gh.sh", "version": ">=2.40" }
+      {
+        "name": "git",
+        "installer": "scripts/install_git.sh",
+        "version": ">=2.30"
+      },
+      {
+        "name": "gh",
+        "installer": "scripts/install_gh.sh",
+        "version": ">=2.40"
+      }
     ],
     "windows": [
-      { "id": "git.main", "title": "Git & GitHub CLI",
-        "body": { "type": "declarative", "spec": "windows/main.json" } }
+      {
+        "id": "git.main",
+        "title": "Git & GitHub CLI",
+        "body": {
+          "type": "declarative",
+          "spec": "windows/main.json"
+        }
+      }
     ],
     "settings_panels": [
-      { "id": "git.settings", "window": "git.main" }
+      {
+        "id": "git.settings",
+        "window": "git.main"
+      }
     ]
   },
-
   "config_schema": {
     "type": "object",
     "properties": {
       "auth_method": {
         "type": "string",
-        "enum": ["token", "device"],
+        "enum": [
+          "token",
+          "device"
+        ],
         "default": "device",
         "description": "How to log into gh: OAuth Device Flow (Sign in with GitHub, no token needed) or paste a personal access token."
       },
       "oauth_client_id": {
         "type": "string",
         "default": "Ov23liWR67ZgY2P6fYKh",
-        "description": "GitHub OAuth App client_id used for the Device Flow login (public value, device flow needs no client_secret; the OAuth App must have Device Flow enabled). Defaults to aw-app-git's own public OAuth App so 'Sign in with GitHub' works out of the box — only override this if you want to use your own OAuth App. Falls back to the AW_APP_GIT_OAUTH_CLIENT_ID env var, then this default, when unset."
+        "description": "GitHub OAuth App client_id used for the Device Flow login (public value, device flow needs no client_secret; the OAuth App must have Device Flow enabled). Defaults to aw-app-git's own public OAuth App so 'Sign in with GitHub' works out of the box \u2014 only override this if you want to use your own OAuth App. Falls back to the AW_APP_GIT_OAUTH_CLIENT_ID env var, then this default, when unset."
       },
       "github_token": {
         "type": "string",
         "x-secret": true,
-        "description": "GitHub personal access token (scopes: repo, read:org). Used for `gh auth login --with-token` when auth_method=token. Never stored in plain config — routed to the zero-knowledge secret store."
+        "description": "GitHub personal access token (scopes: repo, read:org). Used for `gh auth login --with-token` when auth_method=token. Never stored in plain config \u2014 routed to the zero-knowledge secret store."
       },
-      "git_user_name": { "type": "string", "description": "git config --global user.name" },
-      "git_user_email": { "type": "string", "description": "git config --global user.email" },
+      "git_user_name": {
+        "type": "string",
+        "description": "git config --global user.name"
+      },
+      "git_user_email": {
+        "type": "string",
+        "description": "git config --global user.email"
+      },
       "watchdog_enabled": {
         "type": "boolean",
         "default": true,
@@ -73,8 +105,6 @@
     },
     "required": []
   },
-
   "dependencies": {},
-
   "migrations": {}
 }
