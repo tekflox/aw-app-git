@@ -56,16 +56,22 @@ def login_web() -> str:
 
 
 def status() -> str:
-    """Returns `gh auth status` output. Raises GhAuthError if not logged in."""
+    """Returns `gh auth status` output. Raises GhAuthError if not logged in.
+
+    `gh auth status` writes its human-readable report to STDERR (not stdout) in
+    most gh versions, so combine both streams — otherwise the "Logged in to …
+    account <user>" line the username parser needs is invisible and the status
+    panel shows a logged-in state with no username."""
     result = subprocess.run(
         ["gh", "auth", "status"],
         capture_output=True,
         text=True,
         check=False,
     )
+    combined = f"{result.stdout}\n{result.stderr}".strip()
     if result.returncode != 0:
-        raise GhAuthError(result.stderr.strip() or result.stdout.strip())
-    return result.stdout.strip()
+        raise GhAuthError(combined)
+    return combined
 
 
 def logged_in_username(status_text: str) -> str | None:
