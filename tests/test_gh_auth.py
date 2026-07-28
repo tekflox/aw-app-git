@@ -26,6 +26,34 @@ def test_logged_in_username_returns_none_when_not_found():
     assert gh_auth.logged_in_username("some unrelated output") is None
 
 
+def test_whoami_returns_user_on_success(monkeypatch):
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 0
+            stdout = '{"login": "octocat", "id": 1}'
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(gh_auth.subprocess, "run", fake_run)
+    assert gh_auth.whoami() == {"login": "octocat", "id": 1}
+
+
+def test_whoami_returns_none_when_not_authenticated(monkeypatch):
+    """Regression: `gh auth status` was observed exiting 0 with a "not logged
+    in" message in one deployed container, which the old text-parsing check
+    misread as logged in. `gh api user` can't have that failure mode — a
+    non-zero exit (or unparsable body) is the only "not logged in" shape."""
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: To use GitHub CLI in a GitHub Actions workflow..."
+        return R()
+
+    monkeypatch.setattr(gh_auth.subprocess, "run", fake_run)
+    assert gh_auth.whoami() is None
+
+
 def test_configure_git_identity_from_account_fills_from_gh(monkeypatch):
     """One-button login seeds git user.name/email from the GitHub account when
     git has none set yet; private email falls back to the noreply address."""

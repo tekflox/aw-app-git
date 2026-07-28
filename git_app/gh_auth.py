@@ -134,6 +134,23 @@ def logged_in_username(status_text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def whoami() -> dict | None:
+    """Authoritative login check: calls `gh api user` (a real authenticated API
+    request) instead of parsing `gh auth status`'s human-readable report.
+
+    `gh auth status` proved unreliable as a logged-in signal: its message
+    format and exit-code behavior vary across gh versions/environments, and
+    at least one deployed container was observed returning exit code 0 with a
+    "You are not logged into any GitHub hosts" message — the settings panel
+    read that as logged_in:true. `gh api user` can't have that ambiguity: it
+    either returns the account JSON (exit 0, authenticated) or fails (exit
+    non-zero / no parseable JSON, not authenticated) — there's no "successful
+    exit with a not-logged-in message" middle state.
+
+    Returns the parsed user object ({"login", "name", ...}) or None."""
+    return _gh_api_json("user")
+
+
 def logout() -> None:
     """Runs `gh auth logout` for github.com. GH_PROMPT_DISABLED skips the
     interactive confirmation prompt (there's no non-interactive flag)."""

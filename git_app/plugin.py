@@ -251,23 +251,26 @@ class GitAppPlugin:
 
         @api.get("/status")
         async def status():
+            # Authoritative check via `gh api user` (see gh_auth.whoami) instead
+            # of parsing `gh auth status`'s human-readable text — that text's
+            # exit-code/format proved inconsistent across environments and
+            # produced a logged_in:true response even when its own message said
+            # "You are not logged into any GitHub hosts."
             has_token = "github_token" in ctx.secrets.keys()
-            try:
-                auth = gh_auth.status()
-                username = gh_auth.logged_in_username(auth)
+            user = gh_auth.whoami()
+            if user:
                 return {
                     "has_token": has_token,
-                    "gh_auth_status": auth,
+                    "gh_auth_status": f"Logged in to github.com account {user.get('login')}",
                     "logged_in": True,
-                    "username": username,
+                    "username": user.get("login"),
                 }
-            except gh_auth.GhAuthError as e:
-                return {
-                    "has_token": has_token,
-                    "gh_auth_status": str(e),
-                    "logged_in": False,
-                    "username": None,
-                }
+            return {
+                "has_token": has_token,
+                "gh_auth_status": "not logged in",
+                "logged_in": False,
+                "username": None,
+            }
 
         @api.post("/logout")
         async def logout():

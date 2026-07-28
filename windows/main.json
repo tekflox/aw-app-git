@@ -17,9 +17,10 @@
     {
       "id": "device-login",
       "widgets": [
-        { "type": "markdown", "value": "### Sign in with GitHub\nClick to get a one-time code, then open github.com/login/device and enter it there — login is detected automatically, no need to click anything else." },
+        { "type": "markdown", "hide_when_logged_in": true, "value": "### Sign in with GitHub\nClick to get a one-time code, then open github.com/login/device and enter it there — login is detected automatically, no need to click anything else." },
         {
           "type": "button",
+          "hide_when_logged_in": true,
           "label": "Sign in with GitHub",
           "action": {
             "call": "POST /api/apps/git/device/start",

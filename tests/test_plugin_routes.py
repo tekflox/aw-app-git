@@ -230,9 +230,11 @@ def test_device_poll_access_denied(client, monkeypatch):
 
 def test_status_logged_in(client, monkeypatch):
     tc, _ = client
-    monkeypatch.setattr(
-        gh_auth, "status", lambda: "Logged in to github.com account octocat (oauth_token)"
-    )
+    # Authoritative check is now `gh api user` (gh_auth.whoami), not the
+    # fragile `gh auth status` text — see gh_auth.whoami's docstring for why
+    # (a deployed container was observed returning exit 0 with a "not logged
+    # in" message, which the old parser misread as logged_in:true).
+    monkeypatch.setattr(gh_auth, "whoami", lambda: {"login": "octocat"})
     resp = tc.get("/status")
     body = resp.json()
     assert body["logged_in"] is True
@@ -241,11 +243,7 @@ def test_status_logged_in(client, monkeypatch):
 
 def test_status_logged_out(client, monkeypatch):
     tc, _ = client
-
-    def raise_not_logged_in():
-        raise gh_auth.GhAuthError("You are not logged into any GitHub hosts")
-
-    monkeypatch.setattr(gh_auth, "status", raise_not_logged_in)
+    monkeypatch.setattr(gh_auth, "whoami", lambda: None)
     resp = tc.get("/status")
     body = resp.json()
     assert body["logged_in"] is False
