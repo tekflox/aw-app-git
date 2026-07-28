@@ -19,7 +19,9 @@
     "routes:register",
     "secrets:own",
     "fs:workspace-data",
-    "net:outbound"
+    "net:outbound",
+    "watchdog:tasks",
+    "notifications:send"
   ],
 
   "contributes": {
@@ -60,7 +62,17 @@
         "description": "GitHub personal access token (scopes: repo, read:org). Used for `gh auth login --with-token` when auth_method=token. Never stored in plain config — routed to the zero-knowledge secret store."
       },
       "git_user_name": { "type": "string", "description": "git config --global user.name" },
-      "git_user_email": { "type": "string", "description": "git config --global user.email" }
+      "git_user_email": { "type": "string", "description": "git config --global user.email" },
+      "watchdog_enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Watch the workspace's repos and notify (persistent notification) when a repo has uncommitted changes."
+      },
+      "watchdog_interval_s": {
+        "type": "number",
+        "default": 300,
+        "description": "How often (seconds) the uncommitted-changes watchdog re-scans the workspace's repos. Minimum 30s."
+      }
     },
     "required": []
   },

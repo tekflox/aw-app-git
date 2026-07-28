@@ -20,7 +20,7 @@ import json
 import logging
 import os
 
-from . import device_flow, gh_auth
+from . import device_flow, gh_auth, uncommitted_watchdog
 
 log = logging.getLogger("aw_apps.git")
 
@@ -30,6 +30,22 @@ log = logging.getLogger("aw_apps.git")
 # framework doesn't merge config_schema defaults into ctx.config on install,
 # so this fallback is what actually makes that true for a fresh install.
 DEFAULT_OAUTH_CLIENT_ID = "Ov23liWR67ZgY2P6fYKh"
+
+
+def _watchdog_enabled(ctx) -> bool:
+    raw = ctx.secrets.read("watchdog_enabled")
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in ("false", "0", "")
+
+
+def _watchdog_interval_s(ctx) -> float:
+    raw = ctx.secrets.read("watchdog_interval_s")
+    try:
+        interval = float(raw) if raw else uncommitted_watchdog.DEFAULT_INTERVAL_S
+    except (TypeError, ValueError):
+        interval = uncommitted_watchdog.DEFAULT_INTERVAL_S
+    return max(interval, uncommitted_watchdog.MIN_INTERVAL_S)
 
 
 def _oauth_client_id(ctx) -> str:
@@ -73,6 +89,20 @@ class GitAppPlugin:
                 log.warning("gh auth: stored token did not log in: %s", e)
 
         ctx.routes.register(self._build_routes(ctx))
+
+        if ctx.has("watchdog:tasks") and ctx.has("notifications:send"):
+            watchdog = uncommitted_watchdog.UncommittedWatchdog(ctx.notify)
+
+            async def _tick() -> None:
+                if _watchdog_enabled(ctx):
+                    await watchdog.tick()
+
+            ctx.watchdog.register(
+                "uncommitted", _tick,
+                lambda: _watchdog_interval_s(ctx),
+                run_immediately=False,
+            )
+            log.info("aw-app-git: uncommitted-changes watchdog registered")
 
     async def deactivate(self) -> None:
         # git + gh removal is driven by the framework's journal reverse-replay
@@ -181,6 +211,15 @@ class GitAppPlugin:
             gh in, and persists a custom ``oauth_client_id`` if given. Fields
             are all optional so a partial save (e.g. only the token) works."""
             result: dict = {"ok": True}
+            if "watchdog_enabled" in data:
+                ctx.secrets.write("watchdog_enabled", str(bool(data["watchdog_enabled"])))
+                result["watchdog_enabled"] = bool(data["watchdog_enabled"])
+            if data.get("watchdog_interval_s"):
+                try:
+                    ctx.secrets.write("watchdog_interval_s", str(float(data["watchdog_interval_s"])))
+                    result["watchdog_interval_s"] = float(data["watchdog_interval_s"])
+                except (TypeError, ValueError):
+                    result["watchdog_interval_s_error"] = "must be a number"
             oauth_client_id = (data.get("oauth_client_id") or "").strip()
             if oauth_client_id:
                 ctx.secrets.write("oauth_client_id", oauth_client_id)
