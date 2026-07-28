@@ -9,11 +9,16 @@ handed to login_with_token() as a plain string only for the duration of the
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 
 
 class GhAuthError(RuntimeError):
     pass
+
+
+_USERNAME_RE = re.compile(r"Logged in to [^\s]+ account (\S+)")
 
 
 def login_with_token(token: str) -> str:
@@ -61,3 +66,24 @@ def status() -> str:
     if result.returncode != 0:
         raise GhAuthError(result.stderr.strip() or result.stdout.strip())
     return result.stdout.strip()
+
+
+def logged_in_username(status_text: str) -> str | None:
+    """Parses the account name out of `gh auth status` output, e.g.
+    'Logged in to github.com account octocat (oauth_token)' -> 'octocat'."""
+    match = _USERNAME_RE.search(status_text)
+    return match.group(1) if match else None
+
+
+def logout() -> None:
+    """Runs `gh auth logout` for github.com. GH_PROMPT_DISABLED skips the
+    interactive confirmation prompt (there's no non-interactive flag)."""
+    result = subprocess.run(
+        ["gh", "auth", "logout", "--hostname", "github.com"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+    )
+    if result.returncode != 0:
+        raise GhAuthError(f"gh auth logout failed: {result.stderr.strip()}")

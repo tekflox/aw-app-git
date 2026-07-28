@@ -30,6 +30,11 @@ class FakeSecrets:
         self.store[key] = value
         return {"key": key, "written": True}
 
+    def delete(self, key):
+        removed = key in self.store
+        self.store.pop(key, None)
+        return {"key": key, "deleted": removed}
+
     def keys(self):
         return list(self.store)
 
@@ -49,14 +54,49 @@ def client(monkeypatch):
     return TestClient(api), ctx
 
 
-def test_device_start_not_configured(monkeypatch):
+def test_device_start_falls_back_to_baked_default_client_id(monkeypatch):
+    """No config, no env, no saved secret — the device flow still works
+    out of the box using aw-app-git's own public OAuth App client_id."""
     monkeypatch.setattr(gh_auth, "login_with_token", lambda token: "ok")
     ctx = FakeCtx(config={})
     monkeypatch.delenv("AW_APP_GIT_OAUTH_CLIENT_ID", raising=False)
     app = plugin.GitAppPlugin()
     tc = TestClient(app._build_routes(ctx))
+
+    seen = {}
+
+    def fake_start(client_id, scope=device_flow.DEFAULT_SCOPE):
+        seen["client_id"] = client_id
+        return {
+            "device_code": "dev-xyz",
+            "user_code": "WDJB-MJHT",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 900,
+            "interval": 5,
+        }
+
+    monkeypatch.setattr(device_flow, "start", fake_start)
     resp = tc.post("/device/start")
-    assert resp.json()["error"] == "not_configured"
+    assert resp.json()["user_code"] == "WDJB-MJHT"
+    assert seen["client_id"] == plugin.DEFAULT_OAUTH_CLIENT_ID
+
+
+def test_oauth_client_id_precedence(monkeypatch):
+    """secret > config > env > baked default."""
+    monkeypatch.setenv("AW_APP_GIT_OAUTH_CLIENT_ID", "env-client-id")
+    ctx = FakeCtx(config={"oauth_client_id": "config-client-id"})
+    assert plugin._oauth_client_id(ctx) == "config-client-id"
+
+    ctx.secrets.write("oauth_client_id", "secret-client-id")
+    assert plugin._oauth_client_id(ctx) == "secret-client-id"
+
+    ctx2 = FakeCtx(config={})
+    monkeypatch.setenv("AW_APP_GIT_OAUTH_CLIENT_ID", "env-client-id")
+    assert plugin._oauth_client_id(ctx2) == "env-client-id"
+
+    ctx3 = FakeCtx(config={})
+    monkeypatch.delenv("AW_APP_GIT_OAUTH_CLIENT_ID", raising=False)
+    assert plugin._oauth_client_id(ctx3) == plugin.DEFAULT_OAUTH_CLIENT_ID
 
 
 def test_device_start_success(client, monkeypatch):
@@ -186,3 +226,51 @@ def test_device_poll_access_denied(client, monkeypatch):
     monkeypatch.setattr(device_flow, "poll", lambda client_id, device_code: {"status": "access_denied"})
     resp = tc.post("/device/poll")
     assert resp.json()["status"] == "access_denied"
+
+
+def test_status_logged_in(client, monkeypatch):
+    tc, _ = client
+    monkeypatch.setattr(
+        gh_auth, "status", lambda: "Logged in to github.com account octocat (oauth_token)"
+    )
+    resp = tc.get("/status")
+    body = resp.json()
+    assert body["logged_in"] is True
+    assert body["username"] == "octocat"
+
+
+def test_status_logged_out(client, monkeypatch):
+    tc, _ = client
+
+    def raise_not_logged_in():
+        raise gh_auth.GhAuthError("You are not logged into any GitHub hosts")
+
+    monkeypatch.setattr(gh_auth, "status", raise_not_logged_in)
+    resp = tc.get("/status")
+    body = resp.json()
+    assert body["logged_in"] is False
+    assert body["username"] is None
+
+
+def test_logout_clears_token_and_calls_gh(client, monkeypatch):
+    tc, ctx = client
+    ctx.secrets.write("github_token", "gho_realtoken")
+    called = {}
+    monkeypatch.setattr(gh_auth, "logout", lambda: called.setdefault("logout", True))
+    resp = tc.post("/logout")
+    assert resp.json() == {"ok": True}
+    assert called.get("logout") is True
+    assert "github_token" not in ctx.secrets.keys()
+
+
+def test_logout_reports_gh_error(client, monkeypatch):
+    tc, _ = client
+
+    def raise_error():
+        raise gh_auth.GhAuthError("not logged in")
+
+    monkeypatch.setattr(gh_auth, "logout", raise_error)
+    resp = tc.post("/logout")
+    body = resp.json()
+    assert body["ok"] is False
+    assert "not logged in" in body["error"]

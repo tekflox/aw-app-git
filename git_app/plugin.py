@@ -24,17 +24,30 @@ from . import device_flow, gh_auth
 
 log = logging.getLogger("aw_apps.git")
 
+# aw-app-git's own public OAuth App (Device Flow enabled, no client_secret
+# needed) — must match config_schema.oauth_client_id's "default" in
+# aw-app.json so "Sign in with GitHub" works with zero configuration. The
+# framework doesn't merge config_schema defaults into ctx.config on install,
+# so this fallback is what actually makes that true for a fresh install.
+DEFAULT_OAUTH_CLIENT_ID = "Ov23liWR67ZgY2P6fYKh"
+
 
 def _oauth_client_id(ctx) -> str:
     """Public OAuth App client_id (device flow needs no client_secret).
 
-    Config takes precedence over env so a value saved via the settings
-    window overrides the container-wide default.
+    A custom id saved via the Advanced settings form is persisted through
+    ``ctx.secrets`` (the only facade this app has for writing anything that
+    survives a restart — ``ctx.config`` is set once at install time and isn't
+    writable by app routes). That takes precedence over install-time config,
+    then the env var, then the baked-in default — so a value saved via
+    Advanced settings, or set for the whole container, still overrides the
+    app's own OAuth App.
     """
     return (
-        (getattr(ctx, "config", {}) or {}).get("oauth_client_id")
+        ctx.secrets.read("oauth_client_id")
+        or (getattr(ctx, "config", {}) or {}).get("oauth_client_id")
         or os.environ.get("AW_APP_GIT_OAUTH_CLIENT_ID")
-        or ""
+        or DEFAULT_OAUTH_CLIENT_ID
     ).strip()
 
 
@@ -158,11 +171,16 @@ class GitAppPlugin:
 
         @api.post("/settings")
         async def save_settings(data: dict = Body(...)):
-            """Generic config-window submit (the framework's Apps view posts the
-            whole ``config_schema`` object here). Routes the ``x-secret`` token to
-            the secret store, applies git identity, and logs gh in. Fields are all
-            optional so a partial save (e.g. only the token) works."""
+            """Generic config-window submit (the framework's Apps view, and the
+            windows/main.json Advanced form, post here). Routes the
+            ``x-secret`` token to the secret store, applies git identity, logs
+            gh in, and persists a custom ``oauth_client_id`` if given. Fields
+            are all optional so a partial save (e.g. only the token) works."""
             result: dict = {"ok": True}
+            oauth_client_id = (data.get("oauth_client_id") or "").strip()
+            if oauth_client_id:
+                ctx.secrets.write("oauth_client_id", oauth_client_id)
+                result["oauth_client_id"] = "saved"
             token = data.get("github_token", "")
             if token:
                 ctx.secrets.write("github_token", token)
@@ -193,8 +211,30 @@ class GitAppPlugin:
             has_token = "github_token" in ctx.secrets.keys()
             try:
                 auth = gh_auth.status()
+                username = gh_auth.logged_in_username(auth)
+                return {
+                    "has_token": has_token,
+                    "gh_auth_status": auth,
+                    "logged_in": True,
+                    "username": username,
+                }
             except gh_auth.GhAuthError as e:
-                auth = str(e)
-            return {"has_token": has_token, "gh_auth_status": auth}
+                return {
+                    "has_token": has_token,
+                    "gh_auth_status": str(e),
+                    "logged_in": False,
+                    "username": None,
+                }
+
+        @api.post("/logout")
+        async def logout():
+            """Logs gh out and drops the stored token — used by the settings
+            window's Logout button once the user is signed in."""
+            try:
+                gh_auth.logout()
+            except gh_auth.GhAuthError as e:
+                return {"ok": False, "error": str(e)}
+            ctx.secrets.delete("github_token")
+            return {"ok": True}
 
         return api

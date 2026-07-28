@@ -4,8 +4,14 @@
     {
       "id": "status",
       "widgets": [
-        { "type": "markdown", "text": "## Git & GitHub CLI" },
-        { "type": "text", "id": "gh_status", "bind": "GET /api/apps/git/status" }
+        { "type": "markdown", "value": "## Git & GitHub CLI" },
+        {
+          "type": "auth_status",
+          "bind": "GET /api/apps/git/status",
+          "logout_action": { "call": "POST /api/apps/git/logout" },
+          "loading_text": "Checking GitHub login…",
+          "logged_in_text": "Logged in as {username}"
+        }
       ]
     },
     {
@@ -31,11 +37,59 @@
       ]
     },
     {
-      "id": "login",
+      "id": "advanced",
       "widgets": [
-        { "type": "markdown", "value": "### Alternative: paste a token\nOnly needed if the OAuth Device Flow above isn't configured." },
-        { "type": "form", "id": "login_form", "fields": ["auth_method", "github_token"] },
-        { "type": "button", "label": "Log in", "action": { "call": "POST /api/apps/git/login" } }
+        {
+          "type": "collapsible",
+          "title": "Advanced / other sign-in method",
+          "collapsed": true,
+          "widgets": [
+            { "type": "markdown", "value": "Only needed for a token login, your own OAuth App, or setting the git commit identity." },
+            {
+              "type": "form",
+              "id": "advanced_settings",
+              "submit": { "call": "POST /api/apps/git/settings" },
+              "submit_label": "Save",
+              "fields": [
+                {
+                  "key": "auth_method",
+                  "label": "Sign-in method",
+                  "input": "select",
+                  "options": ["web", "token"],
+                  "default": "web",
+                  "description": "web = interactive gh browser login; token = paste a personal access token below."
+                },
+                {
+                  "key": "github_token",
+                  "label": "GitHub personal access token",
+                  "input": "password",
+                  "placeholder": "ghp_…",
+                  "visible_when": { "field": "auth_method", "equals": "token" },
+                  "description": "Scopes: repo, read:org. Stored in the zero-knowledge secret store, never in plain config."
+                },
+                {
+                  "key": "git_user_name",
+                  "label": "Git user.name",
+                  "input": "text",
+                  "placeholder": "Jane Doe"
+                },
+                {
+                  "key": "git_user_email",
+                  "label": "Git user.email",
+                  "input": "text",
+                  "placeholder": "jane@example.com"
+                },
+                {
+                  "key": "oauth_client_id",
+                  "label": "OAuth App client_id (custom)",
+                  "input": "text",
+                  "placeholder": "Ov23liWR67ZgY2P6fYKh (default, already configured)",
+                  "description": "Only set this if you want to use your own GitHub OAuth App for the Sign in with GitHub button instead of aw-app-git's public one."
+                }
+              ]
+            }
+          ]
+        }
       ]
     }
   ]

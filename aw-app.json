@@ -49,7 +49,8 @@
       },
       "oauth_client_id": {
         "type": "string",
-        "description": "GitHub OAuth App client_id used for the Device Flow login (public value, device flow needs no client_secret; the OAuth App must have Device Flow enabled). Falls back to the AW_APP_GIT_OAUTH_CLIENT_ID env var when unset."
+        "default": "Ov23liWR67ZgY2P6fYKh",
+        "description": "GitHub OAuth App client_id used for the Device Flow login (public value, device flow needs no client_secret; the OAuth App must have Device Flow enabled). Defaults to aw-app-git's own public OAuth App so 'Sign in with GitHub' works out of the box — only override this if you want to use your own OAuth App. Falls back to the AW_APP_GIT_OAUTH_CLIENT_ID env var, then this default, when unset."
       },
       "github_token": {
         "type": "string",
