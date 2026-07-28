@@ -6,7 +6,7 @@
   "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, and provides a settings panel for gh login (token stored in the zero-knowledge secret store).",
   "tier": "inprocess",
   "publisher": "TekFlox",
-  "resource_estimate": { "cpu": "low", "memory": "low", "disk": "low" },
+  "resource_estimate": { "cpu": "low", "memory": "-", "disk": "~60 MB" },
 
   "runtime": {
     "python": ">=3.11",
