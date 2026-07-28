@@ -5,6 +5,8 @@
   "version": "0.1.0",
   "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, and provides a settings panel for gh login (token stored in the zero-knowledge secret store).",
   "tier": "inprocess",
+  "publisher": "TekFlox",
+  "resource_estimate": { "cpu": "low", "memory": "low", "disk": "low" },
 
   "runtime": {
     "python": ">=3.11",
