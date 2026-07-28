@@ -90,24 +90,6 @@ def configure_git_identity_from_account() -> dict:
     return {"user.name": cur_name, "user.email": cur_email}
 
 
-def login_web() -> str:
-    """
-    Interactive device-code web flow (`gh auth login --web`). Only usable
-    where the caller can relay the printed one-time code + URL to the user
-    (e.g. surfaced in the settings panel once the framework's settings UI
-    exists) — not usable headless. Returns gh's combined stdout/stderr.
-    """
-    result = subprocess.run(
-        ["gh", "auth", "login", "--web", "--git-protocol", "https"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise GhAuthError(f"gh auth login --web failed: {result.stderr.strip()}")
-    return result.stdout.strip() or result.stderr.strip()
-
-
 def status() -> str:
     """Returns `gh auth status` output. Raises GhAuthError if not logged in.
 

@@ -44,9 +44,9 @@
     "properties": {
       "auth_method": {
         "type": "string",
-        "enum": ["token", "web", "device"],
+        "enum": ["token", "device"],
         "default": "device",
-        "description": "How to log into gh: OAuth Device Flow (Sign in with GitHub, no token needed), paste a personal access token, or run the interactive `gh auth login` web flow (TUI only, not usable from the web UI)."
+        "description": "How to log into gh: OAuth Device Flow (Sign in with GitHub, no token needed) or paste a personal access token."
       },
       "oauth_client_id": {
         "type": "string",

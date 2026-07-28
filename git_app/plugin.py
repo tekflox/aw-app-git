@@ -233,11 +233,6 @@ class GitAppPlugin:
                 except gh_auth.GhAuthError as e:
                     result["logged_in"] = False
                     result["error"] = str(e)
-            elif data.get("auth_method") == "web":
-                try:
-                    result["web_login"] = gh_auth.login_web()
-                except gh_auth.GhAuthError as e:
-                    result["error"] = str(e)
             name = (data.get("git_user_name") or "").strip()
             email = (data.get("git_user_email") or "").strip()
             if name or email:

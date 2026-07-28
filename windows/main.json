@@ -17,7 +17,7 @@
     {
       "id": "device-login",
       "widgets": [
-        { "type": "markdown", "hide_when_logged_in": true, "value": "### Sign in with GitHub\nClick to get a one-time code, then open github.com/login/device and enter it there — login is detected automatically, no need to click anything else." },
+        { "type": "markdown", "hide_when_logged_in": true, "value": "### Sign in with GitHub\nClick to get a one-time code, then open [github.com/login/device](https://github.com/login/device) and enter it there — login is detected automatically, no need to click anything else." },
         {
           "type": "button",
           "hide_when_logged_in": true,
@@ -30,7 +30,7 @@
               "timeout_ms": 900000,
               "done_field": "status",
               "done_values": ["success", "expired_token", "access_denied", "error"],
-              "pending_text": "Waiting for authorization on github.com/login/device…",
+              "pending_text": "Waiting for authorization on [github.com/login/device](https://github.com/login/device)…",
               "timeout_text": "Timed out waiting for authorization — click Sign in with GitHub again."
             }
           }
@@ -42,7 +42,7 @@
       "widgets": [
         {
           "type": "collapsible",
-          "title": "Advanced / other sign-in method",
+          "title": "Advanced / token login",
           "collapsed": true,
           "widgets": [
             { "type": "markdown", "value": "Only needed for a token login, your own OAuth App, or setting the git commit identity." },
@@ -53,20 +53,11 @@
               "submit_label": "Save",
               "fields": [
                 {
-                  "key": "auth_method",
-                  "label": "Sign-in method",
-                  "input": "select",
-                  "options": ["web", "token"],
-                  "default": "web",
-                  "description": "web = interactive gh browser login; token = paste a personal access token below."
-                },
-                {
                   "key": "github_token",
                   "label": "GitHub personal access token",
                   "input": "password",
                   "placeholder": "ghp_…",
-                  "visible_when": { "field": "auth_method", "equals": "token" },
-                  "description": "Scopes: repo, read:org. Stored in the zero-knowledge secret store, never in plain config."
+                  "description": "Paste a token to sign in without the device-flow button above. Scopes: repo, read:org. Stored in the zero-knowledge secret store, never in plain config."
                 },
                 {
                   "key": "git_user_name",
