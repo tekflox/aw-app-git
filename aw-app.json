@@ -8,7 +8,7 @@
   "publisher": "TekFlox",
   "resource_estimate": {
     "cpu": "low",
-    "memory": "-",
+    "memory": "low",
     "disk": "~60 MB"
   },
   "runtime": {
