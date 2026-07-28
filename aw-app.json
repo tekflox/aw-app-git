@@ -34,11 +34,8 @@
       { "id": "git.main", "title": "Git & GitHub CLI",
         "body": { "type": "declarative", "spec": "windows/main.json" } }
     ],
-    "nav": [
-      { "id": "git.nav", "label": "Repos", "icon": "git-branch", "section": "workspace", "opens": "git.main" }
-    ],
     "settings_panels": [
-      { "id": "git.settings", "schema_ref": "#/config_schema" }
+      { "id": "git.settings", "window": "git.main" }
     ]
   },
 
