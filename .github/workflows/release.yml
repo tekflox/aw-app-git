@@ -14,7 +14,7 @@ jobs:
   release:
     # Moving ref: bumping app-release.yml in aw-marketplace propagates here
     # automatically. Move to @v1 once aw-marketplace cuts a first tag.
-    uses: tekflox/aw-marketplace/.github/workflows/app-release.yml@main
+    uses: tekflox/aw-marketplace/.github/workflows/app-release.yml@master
     with:
       bump: ${{ inputs.bump || '' }}
     secrets: inherit
