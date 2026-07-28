@@ -151,7 +151,10 @@ class GitAppPlugin:
                 ctx.secrets.write("github_token", token)
                 try:
                     gh_auth.login_with_token(token)
-                    return {"status": "success", "logged_in": True}
+                    # One button does it all: also seed git's commit identity
+                    # (user.name/user.email) from the account just signed in.
+                    identity = gh_auth.configure_git_identity_from_account()
+                    return {"status": "success", "logged_in": True, "git_identity": identity}
                 except gh_auth.GhAuthError as e:
                     return {"status": "success", "logged_in": False, "error": str(e)}
             return {"status": status}
@@ -165,7 +168,8 @@ class GitAppPlugin:
             ctx.secrets.write("github_token", token)
             try:
                 gh_auth.login_with_token(token)
-                return {"ok": True, "logged_in": True}
+                identity = gh_auth.configure_git_identity_from_account()
+                return {"ok": True, "logged_in": True, "git_identity": identity}
             except gh_auth.GhAuthError as e:
                 return {"ok": True, "logged_in": False, "error": str(e)}
 

@@ -9,6 +9,7 @@ handed to login_with_token() as a plain string only for the duration of the
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -35,6 +36,58 @@ def login_with_token(token: str) -> str:
     if result.returncode != 0:
         raise GhAuthError(f"gh auth login failed: {result.stderr.strip()}")
     return status()
+
+
+def _git_config_get(key: str) -> str:
+    r = subprocess.run(
+        ["git", "config", "--global", "--get", key],
+        capture_output=True, text=True, check=False,
+    )
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _gh_api_json(path: str):
+    r = subprocess.run(["gh", "api", path], capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def configure_git_identity_from_account() -> dict:
+    """Populate git's global ``user.name`` / ``user.email`` from the signed-in
+    GitHub account, so a single "Sign in with GitHub" also sets up git commits —
+    no manual name/email entry needed.
+
+    Non-destructive: only fills a field that isn't already configured (never
+    clobbers an identity the user set on purpose). Email falls back to GitHub's
+    ``<id>+<login>@users.noreply.github.com`` when the account email is private
+    (that address still authors pushes correctly). Returns the effective
+    ``{"user.name", "user.email"}`` after the call."""
+    user = _gh_api_json("user") or {}
+    login = str(user.get("login") or "")
+    name = str(user.get("name") or "").strip() or login
+    email = str(user.get("email") or "").strip()
+    if not email and login:
+        uid = user.get("id")
+        email = (
+            f"{uid}+{login}@users.noreply.github.com" if uid
+            else f"{login}@users.noreply.github.com"
+        )
+
+    cur_name = _git_config_get("user.name")
+    if not cur_name and name:
+        subprocess.run(["git", "config", "--global", "user.name", name], check=False)
+        cur_name = name
+
+    cur_email = _git_config_get("user.email")
+    if not cur_email and email:
+        subprocess.run(["git", "config", "--global", "user.email", email], check=False)
+        cur_email = email
+
+    return {"user.name": cur_name, "user.email": cur_email}
 
 
 def login_web() -> str:
