@@ -1,12 +1,10 @@
 # aw-app-git
 
-First real decoupled app for aw-workspace, per the
-[Decoupled Apps Framework ADR](../../docs/knowledge_base/docs/architecture/decoupled-apps-framework.md)
-(`aw-app.json` manifest schema v1). Installs `git` + the GitHub CLI (`gh`)
-into the workspace and provides a settings panel for logging into `gh`
-(OAuth Device Flow "Sign in with GitHub", a pasted token, or the interactive
-web flow — whatever ends up as a token is a secret, routed to the
-zero-knowledge secret store, never stored in plain config).
+AW workspace app that installs `git` and the GitHub CLI (`gh`) and provides a
+settings panel for logging into `gh`. Supported auth paths include OAuth
+Device Flow "Sign in with GitHub", pasted tokens, and the interactive web
+flow. Any resulting token is routed to the zero-knowledge secret store and is
+never stored in plain config.
 
 ## Status
 
@@ -127,7 +125,7 @@ unit-test with a mocked `httpx.post`.
 - No auto-poll / big-code / copy-to-clipboard UX — the current declarative
   `AppWindow` renderer (`aw-frontend`, F5) only supports `button` widgets
   that POST with no body and show raw JSON; there's no bind/interval-polling
-  widget yet to drive the "Aguardando autorização…" auto-poll loop the task
+  widget yet to drive the "Waiting for authorization..." auto-poll loop the task
   asked for. Backend fully supports it (`/device/poll` is idempotent, safe to
   call repeatedly) — "Check login status" is a manual click today. Wiring a
   real polling UX needs a widget-vocabulary addition in `aw-frontend`
