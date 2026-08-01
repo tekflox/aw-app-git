@@ -15,6 +15,13 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 1
 fi
 
+# The container's default user (ubuntu) is non-root — apt-get and the
+# /etc/apt/keyrings writes below need root, so re-exec ourselves under sudo.
+# -E keeps $HOME etc. pointed at ubuntu's, not root's.
+if [ "$(id -u)" -ne 0 ]; then
+  exec sudo -E bash "$0" "$@"
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends curl ca-certificates gpg

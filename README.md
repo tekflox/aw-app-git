@@ -60,8 +60,12 @@ unit-test with a mocked `httpx.post`.
   installers (Debian/Ubuntu — the aw-workspace container's actual base
   image, confirmed via `podman exec aw-remote-host-workspace cat
   /etc/os-release` → Debian 13 trixie). `gh` installs via GitHub's
-  official apt repo (signed keyring + `sources.list.d` entry).
-- `scripts/uninstall.sh` — reverses both (apt purge + repo file cleanup).
+  official apt repo (signed keyring + `sources.list.d` entry). Both land in
+  `/usr/bin` (apt's regular system path — already on every shell's `PATH`).
+  Since the container's default user (`ubuntu`) is non-root, each script
+  re-execs itself under `sudo -E` before touching apt/`/etc`.
+- `scripts/uninstall.sh` — reverses both (apt purge + repo file cleanup),
+  same `sudo -E` re-exec.
 - `git_app/plugin.py` — `GitAppPlugin` entrypoint; `activate(ctx)` installs
   git + gh via `ctx.commands`, logs `gh` in from the `ctx.secrets` token if
   present, and mounts the settings sub-app via `ctx.routes`. Revert is driven
