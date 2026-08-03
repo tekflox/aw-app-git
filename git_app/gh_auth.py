@@ -22,32 +22,36 @@ class GhAuthError(RuntimeError):
 _USERNAME_RE = re.compile(r"Logged in to [^\s]+ account (\S+)")
 
 
+def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """``subprocess.run`` that turns a missing ``gh``/``git`` binary into an
+    ordinary failed result (exit 127) instead of an unhandled
+    ``FileNotFoundError`` — the CLI can vanish out from under a running app
+    (see the F4 runtime's system-CLI healer, ``src/apps/commands.py``)
+    between two calls here; every caller already handles a non-zero
+    returncode, so this needs no special-casing at the call sites."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, check=False, **kwargs)
+    except FileNotFoundError as e:
+        return subprocess.CompletedProcess(args, 127, "", str(e))
+
+
 def login_with_token(token: str) -> str:
     """Runs `gh auth login --with-token`, piping the token on stdin (never argv/env)."""
     if not token:
         raise GhAuthError("no token provided")
-    result = subprocess.run(
-        ["gh", "auth", "login", "--with-token"],
-        input=token,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _run(["gh", "auth", "login", "--with-token"], input=token)
     if result.returncode != 0:
         raise GhAuthError(f"gh auth login failed: {result.stderr.strip()}")
     return status()
 
 
 def _git_config_get(key: str) -> str:
-    r = subprocess.run(
-        ["git", "config", "--global", "--get", key],
-        capture_output=True, text=True, check=False,
-    )
+    r = _run(["git", "config", "--global", "--get", key])
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def _gh_api_json(path: str):
-    r = subprocess.run(["gh", "api", path], capture_output=True, text=True, check=False)
+    r = _run(["gh", "api", path])
     if r.returncode != 0:
         return None
     try:
@@ -79,12 +83,12 @@ def configure_git_identity_from_account() -> dict:
 
     cur_name = _git_config_get("user.name")
     if not cur_name and name:
-        subprocess.run(["git", "config", "--global", "user.name", name], check=False)
+        _run(["git", "config", "--global", "user.name", name])
         cur_name = name
 
     cur_email = _git_config_get("user.email")
     if not cur_email and email:
-        subprocess.run(["git", "config", "--global", "user.email", email], check=False)
+        _run(["git", "config", "--global", "user.email", email])
         cur_email = email
 
     return {"user.name": cur_name, "user.email": cur_email}
@@ -97,12 +101,7 @@ def status() -> str:
     most gh versions, so combine both streams — otherwise the "Logged in to …
     account <user>" line the username parser needs is invisible and the status
     panel shows a logged-in state with no username."""
-    result = subprocess.run(
-        ["gh", "auth", "status"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _run(["gh", "auth", "status"])
     combined = f"{result.stdout}\n{result.stderr}".strip()
     if result.returncode != 0:
         raise GhAuthError(combined)
@@ -136,11 +135,8 @@ def whoami() -> dict | None:
 def logout() -> None:
     """Runs `gh auth logout` for github.com. GH_PROMPT_DISABLED skips the
     interactive confirmation prompt (there's no non-interactive flag)."""
-    result = subprocess.run(
+    result = _run(
         ["gh", "auth", "logout", "--hostname", "github.com"],
-        capture_output=True,
-        text=True,
-        check=False,
         env={**os.environ, "GH_PROMPT_DISABLED": "1"},
     )
     if result.returncode != 0:
