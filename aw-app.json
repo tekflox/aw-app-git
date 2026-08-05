@@ -105,6 +105,15 @@
     },
     "required": []
   },
-  "dependencies": {},
+  "dependencies": {
+    "apps": [
+      {
+        "id": "diff-tool",
+        "version": ">=0.1.0",
+        "required": true,
+        "reason": "The repos nav's \"show diff\" arrow opens aw-app-diff-tool's window (POST /api/apps/diff-tool/diffs/render). See tekflox/aw-app-diff-tool README."
+      }
+    ]
+  },
   "migrations": {}
 }
