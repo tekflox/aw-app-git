@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "git",
   "name": "Git + GitHub CLI",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, and provides a settings panel for gh login (token stored in the zero-knowledge secret store).",
   "tier": "inprocess",
   "publisher": "TekFlox",
