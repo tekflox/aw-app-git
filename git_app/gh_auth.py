@@ -5,6 +5,20 @@ from plain config — in the real framework it's resolved by ctx.secrets from
 the zero-knowledge store (feature:user-zero-knowledge-secret-storage) and
 handed to login_with_token() as a plain string only for the duration of the
 `gh auth login` subprocess call; it is never written to disk here.
+
+Once logged in, `gh` itself has ALREADY written the real credential
+(`~/.config/gh/hosts.yml`) and `configure_git_identity_from_account()` may
+have touched `~/.gitconfig` — `_sync_creds_to_data_dir()` mirrors those two
+gh/git-owned files into this app's own sanctioned data dir
+(`<AW_WORKSPACE_HOME>/data/git/`, gated by the `fs:workspace-data`
+permission this app already declares) so OTHER processes on the same
+workspace (a spawned agent-CLI container whose Agent Config has the
+"GitHub / Git" permission on) can pick them up too. This is the same shape
+the pre-decoupling `agents-platform` host-path mount
+(`{AW_BASE_DIR}/data/home/.gitconfig` / `.config/gh`, see
+`executor.py`'s `_perm_volumes["github"]`) already relied on — that copy
+used to be done by hand; this makes it automatic, still just relocating
+gh's own already-written files, never inventing a new plaintext secret.
 """
 
 from __future__ import annotations
@@ -12,11 +26,52 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+from pathlib import Path
 
 
 class GhAuthError(RuntimeError):
     pass
+
+
+def _data_dir() -> Path:
+    home = os.environ.get("AW_WORKSPACE_HOME") or os.path.expanduser("~/.aw-workspace")
+    return Path(home) / "data" / "git"
+
+
+def _sync_creds_to_data_dir() -> None:
+    """Best-effort mirror of `~/.config/gh` + `~/.gitconfig` into this app's
+    data dir. Never raises — a failure here must not fail the login/logout
+    call it's attached to; the settings panel already confirmed gh's own
+    auth succeeded, that's the source of truth for "are we logged in"."""
+    try:
+        dst_root = _data_dir()
+        dst_root.mkdir(parents=True, exist_ok=True)
+
+        src_gh = Path.home() / ".config" / "gh"
+        if src_gh.is_dir():
+            dst_gh = dst_root / "config-gh"
+            shutil.rmtree(dst_gh, ignore_errors=True)
+            shutil.copytree(src_gh, dst_gh)
+
+        src_gitconfig = Path.home() / ".gitconfig"
+        if src_gitconfig.is_file():
+            shutil.copyfile(src_gitconfig, dst_root / "gitconfig")
+    except Exception:
+        pass
+
+
+def _clear_creds_from_data_dir() -> None:
+    """Reverses `_sync_creds_to_data_dir()` — called on logout so a revoked
+    login doesn't leave a stale, still-working copy sitting in the data dir
+    for spawned agent containers to keep picking up."""
+    try:
+        dst_root = _data_dir()
+        shutil.rmtree(dst_root / "config-gh", ignore_errors=True)
+        (dst_root / "gitconfig").unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 _USERNAME_RE = re.compile(r"Logged in to [^\s]+ account (\S+)")
@@ -42,6 +97,7 @@ def login_with_token(token: str) -> str:
     result = _run(["gh", "auth", "login", "--with-token"], input=token)
     if result.returncode != 0:
         raise GhAuthError(f"gh auth login failed: {result.stderr.strip()}")
+    _sync_creds_to_data_dir()
     return status()
 
 
@@ -91,6 +147,7 @@ def configure_git_identity_from_account() -> dict:
         _run(["git", "config", "--global", "user.email", email])
         cur_email = email
 
+    _sync_creds_to_data_dir()
     return {"user.name": cur_name, "user.email": cur_email}
 
 
@@ -141,3 +198,4 @@ def logout() -> None:
     )
     if result.returncode != 0:
         raise GhAuthError(f"gh auth logout failed: {result.stderr.strip()}")
+    _clear_creds_from_data_dir()

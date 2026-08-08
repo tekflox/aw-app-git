@@ -81,6 +81,58 @@ def test_configure_git_identity_from_account_fills_from_gh(monkeypatch):
     assert ["git", "config", "--global", "user.email", "583231+octocat@users.noreply.github.com"] in calls
 
 
+def test_login_with_token_syncs_creds_to_data_dir(monkeypatch, tmp_path):
+    """login_with_token() must mirror gh's own ~/.config/gh + ~/.gitconfig
+    into <AW_WORKSPACE_HOME>/data/git/ so a spawned agent container (Agent
+    Config "GitHub / Git" permission on) can pick them up — see the module
+    docstring / _sync_creds_to_data_dir()."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".config" / "gh").mkdir(parents=True)
+    (fake_home / ".config" / "gh" / "hosts.yml").write_text("github.com:\n  oauth_token: abc123\n")
+    (fake_home / ".gitconfig").write_text("[user]\n\tname = octocat\n")
+    monkeypatch.setattr(gh_auth.Path, "home", lambda: fake_home)
+
+    workspace_home = tmp_path / "workspace-home"
+    monkeypatch.setenv("AW_WORKSPACE_HOME", str(workspace_home))
+
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 0
+            stdout = "Logged in to github.com account octocat (oauth_token)"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(gh_auth.subprocess, "run", fake_run)
+    gh_auth.login_with_token("ghp_whatever")
+
+    synced_hosts = workspace_home / "data" / "git" / "config-gh" / "hosts.yml"
+    synced_gitconfig = workspace_home / "data" / "git" / "gitconfig"
+    assert synced_hosts.read_text() == "github.com:\n  oauth_token: abc123\n"
+    assert synced_gitconfig.read_text() == "[user]\n\tname = octocat\n"
+
+
+def test_logout_clears_synced_creds(monkeypatch, tmp_path):
+    workspace_home = tmp_path / "workspace-home"
+    data_dir = workspace_home / "data" / "git"
+    (data_dir / "config-gh").mkdir(parents=True)
+    (data_dir / "config-gh" / "hosts.yml").write_text("stale")
+    (data_dir / "gitconfig").write_text("stale")
+    monkeypatch.setenv("AW_WORKSPACE_HOME", str(workspace_home))
+
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(gh_auth.subprocess, "run", fake_run)
+    gh_auth.logout()
+
+    assert not (data_dir / "config-gh").exists()
+    assert not (data_dir / "gitconfig").exists()
+
+
 def test_configure_git_identity_does_not_clobber_existing(monkeypatch):
     def fake_run(cmd, **kw):
         class R:
