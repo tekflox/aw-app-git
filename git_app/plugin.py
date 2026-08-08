@@ -128,8 +128,8 @@ class GitAppPlugin:
                 return {
                     "error": "not_configured",
                     "message": (
-                        "Configure o OAuth App client_id (config oauth_client_id ou "
-                        "env AW_APP_GIT_OAUTH_CLIENT_ID) antes de usar o Sign in with GitHub."
+                        "Configure the OAuth App client_id (config oauth_client_id or "
+                        "env AW_APP_GIT_OAUTH_CLIENT_ID) before using Sign in with GitHub."
                     ),
                 }
             try:

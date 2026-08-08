@@ -14,7 +14,7 @@ import httpx
 
 DEVICE_CODE_URL = "https://github.com/login/device/code"
 ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
-DEFAULT_SCOPE = "repo read:org"
+DEFAULT_SCOPE = "repo read:org gist workflow"
 GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 
 _HEADERS = {"Accept": "application/json"}
