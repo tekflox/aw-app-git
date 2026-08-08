@@ -97,6 +97,13 @@ def login_with_token(token: str) -> str:
     result = _run(["gh", "auth", "login", "--with-token"], input=token)
     if result.returncode != 0:
         raise GhAuthError(f"gh auth login failed: {result.stderr.strip()}")
+    # Wires plain `git` (clone/push/pull over HTTPS) to authenticate through
+    # `gh`'s own credential store too — writes a `credential."https://
+    # github.com".helper = !gh auth git-credential` block into ~/.gitconfig.
+    # Without this, only `gh` subcommands would work after login; git itself
+    # would still prompt/fail. Best-effort: `gh auth login` above already
+    # succeeded, a failure here shouldn't fail the whole login.
+    _run(["gh", "auth", "setup-git"])
     _sync_creds_to_data_dir()
     return status()
 
