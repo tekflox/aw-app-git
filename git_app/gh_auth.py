@@ -123,6 +123,19 @@ def _gh_api_json(path: str):
         return None
 
 
+def current_git_identity() -> dict:
+    """The git commit identity currently in effect, for display.
+
+    Reported so the settings panel can show that signing in really did set
+    up commits — the auto-fill is silent otherwise, and a user who can't see
+    it has no reason to believe it happened.
+    """
+    return {
+        "user.name": _git_config_get("user.name"),
+        "user.email": _git_config_get("user.email"),
+    }
+
+
 def configure_git_identity_from_account() -> dict:
     """Populate git's global ``user.name`` / ``user.email`` from the signed-in
     GitHub account, so a single "Sign in with GitHub" also sets up git commits —

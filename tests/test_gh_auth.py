@@ -183,3 +183,12 @@ def test_a_bare_repo_token_is_reported_as_missing_the_rest():
     eff = gh_auth._effective_scopes(["repo"])
     missing = [s for s in gh_auth.RECOMMENDED_SCOPES if s not in eff]
     assert "read:org" in missing and "read:packages" in missing
+
+
+def test_current_git_identity_reports_both_fields(monkeypatch):
+    """The panel shows the identity so the silent auto-fill is visible —
+    a user with no way to see it has no reason to believe it happened."""
+    from git_app import gh_auth
+    monkeypatch.setattr(gh_auth, "_git_config_get",
+                        lambda key: {"user.name": "Jane", "user.email": "j@x.io"}[key])
+    assert gh_auth.current_git_identity() == {"user.name": "Jane", "user.email": "j@x.io"}

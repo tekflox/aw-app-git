@@ -230,6 +230,12 @@ class GitAppPlugin:
                 try:
                     gh_auth.login_with_token(token)
                     result["logged_in"] = True
+                    # Parity with the device-flow path (/device/poll): either
+                    # way of signing in should leave a usable git identity, so
+                    # the user never has to know which one they used. Only
+                    # fills fields that are empty — an identity set on purpose
+                    # is never clobbered.
+                    result["git_identity"] = gh_auth.configure_git_identity_from_account()
                 except gh_auth.GhAuthError as e:
                     result["logged_in"] = False
                     result["error"] = str(e)
@@ -274,6 +280,7 @@ class GitAppPlugin:
             scopes_text = ", ".join(scopes) if scopes else "unknown"
             if missing:
                 scopes_text += f"  ⚠️ missing: {', '.join(missing)}"
+            identity = gh_auth.current_git_identity()
             return {
                 "has_token": has_token,
                 "gh_auth_status": f"Logged in to github.com account {user.get('login')}",
@@ -284,6 +291,8 @@ class GitAppPlugin:
                 "scopes": scopes,
                 "missing_scopes": missing,
                 "scopes_text": scopes_text,
+                "git_user_name": identity.get("user.name") or "—",
+                "git_user_email": identity.get("user.email") or "—",
             }
 
         @api.post("/logout")
