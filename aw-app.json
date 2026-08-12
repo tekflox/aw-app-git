@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "git",
   "name": "Git + GitHub CLI",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, and provides a settings panel for gh login (token stored in the zero-knowledge secret store).",
   "tier": "inprocess",
   "publisher": "TekFlox",
@@ -72,17 +72,17 @@
           "device"
         ],
         "default": "device",
-        "description": "How to log into gh: OAuth Device Flow (Sign in with GitHub, no token needed) or paste a personal access token. Device flow only grants what aw-app-git's OAuth App requests (repo, read:org, gist, workflow) — it cannot grant write:packages or admin:org, so those require a token."
+        "description": "How to log into gh: OAuth Device Flow (Sign in with GitHub, no token needed) or paste a personal access token. Device flow only grants what aw-app-git's OAuth App requests (repo, read:org, gist, workflow) \u2014 it cannot grant write:packages or admin:org, so those require a token."
       },
       "oauth_client_id": {
         "type": "string",
         "default": "Ov23liWR67ZgY2P6fYKh",
-        "description": "GitHub OAuth App client_id used for the Device Flow login (public value, device flow needs no client_secret; the OAuth App must have Device Flow enabled). Defaults to aw-app-git's own public OAuth App so 'Sign in with GitHub' works out of the box — only override this if you want to use your own OAuth App. Falls back to the AW_APP_GIT_OAUTH_CLIENT_ID env var, then this default, when unset."
+        "description": "GitHub OAuth App client_id used for the Device Flow login (public value, device flow needs no client_secret; the OAuth App must have Device Flow enabled). Defaults to aw-app-git's own public OAuth App so 'Sign in with GitHub' works out of the box \u2014 only override this if you want to use your own OAuth App. Falls back to the AW_APP_GIT_OAUTH_CLIENT_ID env var, then this default, when unset."
       },
       "github_token": {
         "type": "string",
         "x-secret": true,
-        "description": "GitHub personal access token. Write-only: once saved it is never shown back here (it lives in the zero-knowledge secret store), so this field stays blank even when a token IS stored — the 'Git & GitHub CLI' panel below shows the masked fingerprint and the scopes actually granted. Recommended scopes: repo, read:org, workflow, read:packages (add write:packages to publish app images, admin:org to manage runner groups)."
+        "description": "GitHub personal access token. Write-only: once saved it is never shown back here (it lives in the zero-knowledge secret store), so this field stays blank even when a token IS stored \u2014 the 'Git & GitHub CLI' panel below shows the masked fingerprint and the scopes actually granted. Recommended scopes: repo, read:org, workflow, read:packages (add write:packages to publish app images, admin:org to manage runner groups)."
       },
       "git_user_name": {
         "type": "string",
