@@ -3,7 +3,7 @@
   "id": "git",
   "name": "Git + GitHub CLI",
   "version": "0.12.0",
-  "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, and provides a settings panel for gh login (token stored in the zero-knowledge secret store).",
+  "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, provides a settings panel for gh login (token stored in the zero-knowledge secret store), and serves the GitHub PR dashboard (open PRs for you and your team, plus repo status) the workspace nav reads.",
   "tier": "inprocess",
   "publisher": "TekFlox",
   "resource_estimate": {
@@ -82,6 +82,19 @@
         "type": "number",
         "default": 300,
         "description": "How often (seconds) the uncommitted-changes watchdog re-scans the workspace's repos. Minimum 30s."
+      },
+      "github_team": {
+        "type": "string",
+        "description": "PR dashboard: comma-separated GitHub logins whose open PRs are shown next to yours. Left empty, the app discovers your frequent collaborators once (from the last 3 months) and fills this in."
+      },
+      "github_host": {
+        "type": "string",
+        "description": "PR dashboard: GitHub Enterprise host for the gh CLI (GH_HOST). Leave empty for github.com."
+      },
+      "github_poll_interval_s": {
+        "type": "number",
+        "default": 300,
+        "description": "PR dashboard: how often (seconds) to re-poll GitHub for PRs and repo status. Minimum 60s."
       }
     },
     "required": []

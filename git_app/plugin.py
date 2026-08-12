@@ -20,7 +20,14 @@ import json
 import logging
 import os
 
-from . import device_flow, gh_auth, uncommitted_watchdog
+# Module level, unlike the other fastapi imports (which stay local to
+# _build_routes): this file uses `from __future__ import annotations`, so a
+# handler's annotations are strings FastAPI resolves against the MODULE's
+# globals. A WebSocket imported inside the function isn't there, and the socket
+# param gets mistaken for a required query field (close 1008 on connect).
+from fastapi import WebSocket, WebSocketDisconnect
+
+from . import device_flow, gh_auth, github_prs, uncommitted_watchdog
 
 log = logging.getLogger("aw_apps.git")
 
@@ -46,6 +53,59 @@ def _watchdog_interval_s(ctx) -> float:
     except (TypeError, ValueError):
         interval = uncommitted_watchdog.DEFAULT_INTERVAL_S
     return max(interval, uncommitted_watchdog.MIN_INTERVAL_S)
+
+
+def _github_team(ctx) -> list[str]:
+    """The PR-dashboard's team list (buddy logins whose PRs are also shown).
+
+    Stored as JSON in ``ctx.secrets`` (app-writable) with install-time
+    ``ctx.config`` as fallback, same precedence as :func:`_oauth_client_id`. A
+    comma-separated string is accepted too — that's what a plain settings text
+    field posts, and what auto-discovery used to write into the monolith's
+    aw.json.
+    """
+    raw = ctx.secrets.read("github_team")
+    if raw is None:
+        raw = (getattr(ctx, "config", {}) or {}).get("github_team")
+    if isinstance(raw, list):
+        return [str(m).strip() for m in raw if str(m).strip()]
+    if not raw:
+        return []
+    text = str(raw).strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(m).strip() for m in parsed if str(m).strip()]
+        except json.JSONDecodeError:
+            log.warning("github_team is not valid JSON — falling back to comma-split")
+    return [m.strip() for m in text.split(",") if m.strip()]
+
+
+def _github_cfg(ctx) -> dict:
+    """The ``github`` config block the ported dashboard expects — same keys the
+    monolith read out of aw.json (``team``/``host``/``poll_interval``)."""
+    host = (
+        ctx.secrets.read("github_host")
+        or (getattr(ctx, "config", {}) or {}).get("github_host")
+        or ""
+    ).strip()
+    return {
+        "team": _github_team(ctx),
+        "host": host or None,
+        "poll_interval": _github_poll_interval_s(ctx),
+    }
+
+
+def _github_poll_interval_s(ctx) -> float:
+    raw = ctx.secrets.read("github_poll_interval_s")
+    if raw is None:
+        raw = (getattr(ctx, "config", {}) or {}).get("github_poll_interval_s")
+    try:
+        interval = float(raw) if raw else github_prs.DEFAULT_POLL_INTERVAL
+    except (TypeError, ValueError):
+        interval = github_prs.DEFAULT_POLL_INTERVAL
+    return max(interval, 60.0)
 
 
 def _oauth_client_id(ctx) -> str:
@@ -104,15 +164,98 @@ class GitAppPlugin:
             )
             log.info("aw-app-git: uncommitted-changes watchdog registered")
 
+        if ctx.has("watchdog:tasks"):
+            # The PR dashboard's poller. The monolith ran its own `while True`
+            # loop; here the framework owns the cadence (and cancels it on
+            # uninstall). Not immediate: activate() runs during boot reconcile,
+            # and a first poll shells out to `gh` several times.
+            ctx.watchdog.register(
+                "github", self._pr_watchdog(ctx).poll,
+                lambda: _github_poll_interval_s(ctx),
+                run_immediately=False,
+            )
+            log.info("aw-app-git: GitHub PR watchdog registered")
+
     async def deactivate(self) -> None:
         # git + gh removal is driven by the framework's journal reverse-replay
         # (scripts/uninstall.sh); the secret namespace is purged by the runtime.
         log.info("aw-app-git deactivated")
 
+    def _pr_watchdog(self, ctx):
+        """The PR dashboard's poller — ONE instance shared by the routes and the
+        registered watchdog task (they read/refresh the same cache). Built
+        lazily so ``_build_routes`` also works standalone, without activate()."""
+        existing = getattr(self, "_prs", None)
+        if existing is not None:
+            return existing
+        try:
+            notify = ctx.notify if ctx.has("notifications:send") else None
+        except AttributeError:
+            notify = None  # a ctx without the facade (tests) — no notifications
+
+        def _save_team(members: list[str]) -> None:
+            ctx.secrets.write("github_team", json.dumps(members))
+
+        self._prs = github_prs.PrWatchdog(
+            lambda: _github_cfg(ctx), notify=notify, save_team=_save_team
+        )
+        return self._prs
+
     def _build_routes(self, ctx):
+        import asyncio
+
         from fastapi import Body, FastAPI
+        from fastapi.responses import JSONResponse
 
         api = FastAPI()
+
+        # ---- GitHub PR dashboard (ported from the monolith's /api/github/*) ----
+        # Same payloads, same semantics; only the prefix moves, from the core's
+        # /api/github/... to this app's own /api/apps/git/github/... mount.
+        prs = self._pr_watchdog(ctx)
+
+        @api.get("/github/prs")
+        async def get_prs():
+            """Return cached PR data."""
+            cached = prs.get_cached()
+            if not cached["last_poll"]:
+                await prs.poll()
+                cached = prs.get_cached()
+            return cached
+
+        @api.post("/github/refresh")
+        async def refresh_prs():
+            """Force a fresh poll."""
+            await prs.poll()
+            return prs.get_cached()
+
+        @api.post("/github/find-buddies")
+        async def find_buddies():
+            """Discover frequent PR collaborators from the last 3 months."""
+            loop = asyncio.get_running_loop()
+            try:
+                buddies = await loop.run_in_executor(
+                    None, github_prs.find_buddies, _github_cfg(ctx))
+                return {"buddies": buddies}
+            except Exception as e:
+                return JSONResponse(status_code=500, content={"error": str(e)})
+
+        @api.websocket("/github/stream")
+        async def github_stream(websocket: WebSocket):
+            """WebSocket endpoint — sends cached data on connect, then live
+            updates. The monolith served this at /ws/github; an app's sockets
+            live under its own mount (identity-guarded there like every other
+            app route — see AppRuntime's guard)."""
+            await websocket.accept()
+            await websocket.send_text(json.dumps({"type": "github_init", **prs.get_cached()}))
+            prs.add_listener(websocket)
+            try:
+                while True:
+                    await websocket.receive_text()
+            except WebSocketDisconnect:
+                pass  # client closed the github stream
+            finally:
+                prs.remove_listener(websocket)
 
         # In-memory state for the one device-flow login in flight at a time
         # (single-user workspace — no need to key this by session/user).
@@ -220,6 +363,22 @@ class GitAppPlugin:
                     result["watchdog_interval_s"] = float(data["watchdog_interval_s"])
                 except (TypeError, ValueError):
                     result["watchdog_interval_s_error"] = "must be a number"
+            if "github_team" in data:
+                team = data["github_team"]
+                if not isinstance(team, list):
+                    team = [m.strip() for m in str(team).split(",") if m.strip()]
+                ctx.secrets.write("github_team", json.dumps(team))
+                result["github_team"] = team
+            if "github_host" in data:
+                ctx.secrets.write("github_host", (data.get("github_host") or "").strip())
+                result["github_host"] = (data.get("github_host") or "").strip()
+            if data.get("github_poll_interval_s"):
+                try:
+                    ctx.secrets.write(
+                        "github_poll_interval_s", str(float(data["github_poll_interval_s"])))
+                    result["github_poll_interval_s"] = float(data["github_poll_interval_s"])
+                except (TypeError, ValueError):
+                    result["github_poll_interval_s_error"] = "must be a number"
             oauth_client_id = (data.get("oauth_client_id") or "").strip()
             if oauth_client_id:
                 ctx.secrets.write("oauth_client_id", oauth_client_id)
