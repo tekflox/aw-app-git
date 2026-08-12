@@ -196,6 +196,83 @@ def whoami() -> dict | None:
     return _gh_api_json("user")
 
 
+# Scopes the workspace itself relies on beyond a plain `repo` login. The
+# device flow can NEVER grant these: an OAuth App's device-flow grant is
+# limited to the scopes that App requests, and aw-app-git's public OAuth App
+# asks only for repo/read:org/gist/workflow. Publishing an app image to GHCR
+# or managing an org runner group therefore needs a PAT, and the settings
+# panel should say so rather than leaving the user to discover it from a
+# 403 much later.
+RECOMMENDED_SCOPES = ("repo", "read:org", "workflow", "read:packages")
+
+# GitHub scopes nest: granting a broad one implies the narrower ones, and
+# the API only ever reports the broad one. A plain set-membership check
+# therefore reports `read:org` "missing" on a token that holds `admin:org`
+# — a false warning, which is worse than no warning because it teaches the
+# user to ignore the panel. Only the implications this app checks for.
+_SCOPE_IMPLIES = {
+    "admin:org": ("write:org", "read:org"),
+    "write:org": ("read:org",),
+    "write:packages": ("read:packages",),
+    "delete:packages": ("read:packages",),
+    "admin:repo_hook": ("write:repo_hook", "read:repo_hook"),
+    "admin:public_key": ("write:public_key", "read:public_key"),
+    "repo": ("public_repo", "repo:status", "repo_deployment", "repo:invite",
+             "security_events"),
+    "user": ("read:user", "user:email", "user:follow"),
+}
+
+
+def _effective_scopes(granted: list[str]) -> set[str]:
+    """Granted scopes plus everything they imply."""
+    out = set(granted)
+    for scope in granted:
+        out.update(_SCOPE_IMPLIES.get(scope, ()))
+    return out
+
+
+def token_info() -> dict:
+    """Masked token + granted scopes, for display in the settings panel.
+
+    The raw token is NEVER returned — only enough of it to recognise which
+    credential is in place (prefix + last 4). That's the whole point: a
+    secret field that renders blank is indistinguishable from "nothing
+    saved", which is exactly the confusion this reports away.
+
+    Scopes come from GitHub's ``X-OAuth-Scopes`` response header, so they
+    reflect what the credential can actually do, not what someone intended
+    when creating it.
+    """
+    out: dict = {"masked": None, "scopes": [], "missing_scopes": [], "kind": None}
+    try:
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True,
+                                text=True, timeout=15)
+        token = (result.stdout or "").strip()
+    except (OSError, subprocess.SubprocessError):
+        token = ""
+    if not token:
+        return out
+
+    out["kind"] = "oauth (device flow)" if token.startswith("gho_") else "personal access token"
+    out["masked"] = f"{token[:4]}{'•' * 8}{token[-4:]}" if len(token) > 12 else "••••"
+
+    # `gh api -i` prepends the response headers to the body.
+    try:
+        result = subprocess.run(["gh", "api", "-i", "user"], capture_output=True,
+                                text=True, timeout=20)
+        for line in (result.stdout or "").splitlines():
+            if line.lower().startswith("x-oauth-scopes:"):
+                raw = line.split(":", 1)[1]
+                out["scopes"] = [s.strip() for s in raw.split(",") if s.strip()]
+                break
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    effective = _effective_scopes(out["scopes"])
+    out["missing_scopes"] = [s for s in RECOMMENDED_SCOPES if s not in effective]
+    return out
+
+
 def logout() -> None:
     """Runs `gh auth logout` for github.com. GH_PROMPT_DISABLED skips the
     interactive confirmation prompt (there's no non-interactive flag)."""

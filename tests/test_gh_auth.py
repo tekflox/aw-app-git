@@ -156,3 +156,30 @@ def test_configure_git_identity_does_not_clobber_existing(monkeypatch):
     out = gh_auth.configure_git_identity_from_account()
     assert out == {"user.name": "Existing Name", "user.email": "me@existing.dev"}
     assert sets == []  # nothing overwritten
+
+
+# --- scope reporting ---------------------------------------------------------
+
+
+def test_broad_scopes_imply_the_narrow_ones():
+    """A token with admin:org holds read:org — GitHub only reports the broad
+    one, so a naive membership check would raise a false 'missing' warning."""
+    from git_app.gh_auth import _effective_scopes
+    eff = _effective_scopes(["admin:org", "write:packages", "repo"])
+    assert "read:org" in eff
+    assert "read:packages" in eff
+    assert "public_repo" in eff
+
+
+def test_nothing_reported_missing_for_a_full_admin_token(monkeypatch):
+    from git_app import gh_auth
+    monkeypatch.setattr(gh_auth, "_effective_scopes", gh_auth._effective_scopes)
+    eff = gh_auth._effective_scopes(["repo", "admin:org", "workflow", "write:packages"])
+    assert [s for s in gh_auth.RECOMMENDED_SCOPES if s not in eff] == []
+
+
+def test_a_bare_repo_token_is_reported_as_missing_the_rest():
+    from git_app import gh_auth
+    eff = gh_auth._effective_scopes(["repo"])
+    missing = [s for s in gh_auth.RECOMMENDED_SCOPES if s not in eff]
+    assert "read:org" in missing and "read:packages" in missing

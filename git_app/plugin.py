@@ -253,18 +253,37 @@ class GitAppPlugin:
             # "You are not logged into any GitHub hosts."
             has_token = "github_token" in ctx.secrets.keys()
             user = gh_auth.whoami()
-            if user:
+            if not user:
                 return {
                     "has_token": has_token,
-                    "gh_auth_status": f"Logged in to github.com account {user.get('login')}",
-                    "logged_in": True,
-                    "username": user.get("login"),
+                    "gh_auth_status": "not logged in",
+                    "logged_in": False,
+                    "username": None,
+                    "token_masked": "—",
+                    "token_kind": "—",
+                    "scopes_text": "—",
                 }
+
+            # A secret input renders blank whether or not something is saved,
+            # which reads as "nothing here". Report a masked fingerprint and
+            # the ACTUAL granted scopes so the panel can show which
+            # credential is in place and what it can do.
+            info = gh_auth.token_info()
+            missing = info.get("missing_scopes") or []
+            scopes = info.get("scopes") or []
+            scopes_text = ", ".join(scopes) if scopes else "unknown"
+            if missing:
+                scopes_text += f"  ⚠️ missing: {', '.join(missing)}"
             return {
                 "has_token": has_token,
-                "gh_auth_status": "not logged in",
-                "logged_in": False,
-                "username": None,
+                "gh_auth_status": f"Logged in to github.com account {user.get('login')}",
+                "logged_in": True,
+                "username": user.get("login"),
+                "token_masked": info.get("masked") or "—",
+                "token_kind": info.get("kind") or "—",
+                "scopes": scopes,
+                "missing_scopes": missing,
+                "scopes_text": scopes_text,
             }
 
         @api.post("/logout")

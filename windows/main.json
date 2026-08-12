@@ -4,20 +4,70 @@
     {
       "id": "status",
       "widgets": [
-        { "type": "markdown", "value": "## Git & GitHub CLI" },
+        {
+          "type": "markdown",
+          "value": "## Git &amp; GitHub CLI"
+        },
         {
           "type": "auth_status",
           "bind": "GET /api/apps/git/status",
-          "logout_action": { "call": "POST /api/apps/git/logout" },
+          "logout_action": {
+            "call": "POST /api/apps/git/logout"
+          },
           "loading_text": "Checking GitHub login…",
-          "logged_in_text": "Logged in as {username}"
+          "logged_in_text": "Logged in as {username}",
+          "logged_out_text": "Not signed in."
+        }
+      ]
+    },
+    {
+      "id": "credential",
+      "widgets": [
+        {
+          "type": "auth_status",
+          "bind": "GET /api/apps/git/status",
+          "loading_text": "",
+          "logged_in_text": "Token {token_masked}  ·  {token_kind}\n\nScopes: {scopes_text}",
+          "logged_out_text": ""
+        },
+        {
+          "type": "collapsible",
+          "title": "Update token",
+          "collapsed": true,
+          "widgets": [
+            {
+              "type": "markdown",
+              "value": "Paste a **personal access token** to replace the stored credential. Saving signs `gh` in immediately and re-mirrors it to every agent container.\n\nThe device-flow button only ever grants what aw-app-git's OAuth App requests (`repo`, `read:org`, `gist`, `workflow`) — it **cannot** grant `write:packages` or `admin:org`. Publishing an app image to GHCR or managing an org runner group needs a PAT with those scopes."
+            },
+            {
+              "type": "form",
+              "id": "token_update",
+              "submit": {
+                "call": "POST /api/apps/git/settings"
+              },
+              "submit_label": "Save token",
+              "fields": [
+                {
+                  "key": "github_token",
+                  "label": "GitHub personal access token",
+                  "input": "password",
+                  "placeholder": "ghp_… / github_pat_…",
+                  "description": "Stored in the zero-knowledge secret store, never in plain config. Re-applied on every boot."
+                }
+              ]
+            }
+          ]
         }
       ]
     },
     {
       "id": "device-login",
       "widgets": [
-        { "type": "markdown", "hide_when_logged_in": true, "value": "### Sign in with GitHub\nClick to get a one-time code, then open [github.com/login/device](https://github.com/login/device) and enter it there — login is detected automatically, no need to click anything else." },
+        {
+          "type": "markdown",
+          "hide_when_logged_in": true,
+          "value": "### Sign in with GitHub\nClick to get a one-time code, then open [github.com/login/device](https://github.com/login/device) and enter it there — login is detected automatically, no need to click anything else."
+        },
         {
           "type": "button",
           "hide_when_logged_in": true,
@@ -29,7 +79,12 @@
               "interval_ms": 3000,
               "timeout_ms": 900000,
               "done_field": "status",
-              "done_values": ["success", "expired_token", "access_denied", "error"],
+              "done_values": [
+                "success",
+                "expired_token",
+                "access_denied",
+                "error"
+              ],
               "pending_text": "Waiting for authorization on [github.com/login/device](https://github.com/login/device)…",
               "timeout_text": "Timed out waiting for authorization — click Sign in with GitHub again."
             }
@@ -42,23 +97,21 @@
       "widgets": [
         {
           "type": "collapsible",
-          "title": "Advanced / token login",
+          "title": "Advanced / git identity",
           "collapsed": true,
           "widgets": [
-            { "type": "markdown", "value": "Only needed for a token login, your own OAuth App, or setting the git commit identity." },
+            {
+              "type": "markdown",
+              "value": "Git commit identity and, rarely, your own OAuth App for the Sign in with GitHub button."
+            },
             {
               "type": "form",
               "id": "advanced_settings",
-              "submit": { "call": "POST /api/apps/git/settings" },
+              "submit": {
+                "call": "POST /api/apps/git/settings"
+              },
               "submit_label": "Save",
               "fields": [
-                {
-                  "key": "github_token",
-                  "label": "GitHub personal access token",
-                  "input": "password",
-                  "placeholder": "ghp_…",
-                  "description": "Paste a token to sign in without the device-flow button above. Scopes: repo, read:org. Stored in the zero-knowledge secret store, never in plain config."
-                },
                 {
                   "key": "git_user_name",
                   "label": "Git user.name",
