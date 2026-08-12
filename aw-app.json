@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "git",
   "name": "Git + GitHub CLI",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, and provides a settings panel for gh login (token stored in the zero-knowledge secret store).",
   "tier": "inprocess",
   "publisher": "TekFlox",
@@ -67,7 +67,7 @@
     "properties": {
       "git_user_name": {
         "type": "string",
-        "description": "git config --global user.name. Filled in automatically from your GitHub account when you sign in — set it here only to override."
+        "description": "git config --global user.name. Filled in automatically from your GitHub account when you sign in \u2014 set it here only to override."
       },
       "git_user_email": {
         "type": "string",
