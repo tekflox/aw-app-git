@@ -96,7 +96,7 @@ def test_fetch_prs_dedupes_across_mine_team_and_review(monkeypatch):
     assert review_prs == []                         # `shared` already seen via team
 
 
-# ---- DIVERGENCE 1: PRs are fetched without a team configured -------------
+# ---- DIVERGENCE: PRs are fetched without a team configured ---------------
 
 def test_poll_fetches_prs_with_no_team(monkeypatch):
     """The monolith only fetched PRs when a team was set, so a fresh install
@@ -169,29 +169,6 @@ def test_detect_changes_is_silent_without_notify():
     wd._detect_pr_changes({}, {}, [], [])  # must not raise
 
 
-# ---- DIVERGENCE 2 + 3: find_buddies return shape / login filter ----------
-
-def test_find_buddies_returns_empty_list_not_tuple(monkeypatch):
-    monkeypatch.setattr(github_prs, "_run_gh",
-                        lambda args, host=None: "me" if args[:2] == ["api", "user"] else [])
-    assert github_prs.find_buddies({}) == []
-
-
-def test_find_buddies_keeps_logins_without_a_dash(monkeypatch):
-    """The monolith dropped every login without a '-' (one org's convention),
-    which discards ordinary GitHub logins."""
-    def fake_gh(args, host=None):
-        if args[:2] == ["api", "user"]:
-            return "me"
-        if args[:2] == ["search", "prs"] and "--reviewed-by" in args:
-            return [{"author": {"login": "octocat"}, "number": 9}]
-        return []
-
-    monkeypatch.setattr(github_prs, "_run_gh", fake_gh)
-    names = [b["name"] for b in github_prs.find_buddies({})]
-    assert names == ["octocat"]
-
-
 # ---- config plumbing ----------------------------------------------------
 
 def test_github_team_accepts_json_and_csv():
@@ -238,18 +215,6 @@ def test_prs_route_polls_on_first_call(client):
 def test_refresh_route_repolls(client):
     tc, _ = client
     assert tc.post("/github/refresh").json()["last_poll"] > 0
-
-
-def test_find_buddies_route_reports_error_as_500(client, monkeypatch):
-    tc, _ = client
-
-    def boom(cfg):
-        raise RuntimeError("Could not determine GitHub username")
-
-    monkeypatch.setattr(github_prs, "find_buddies", boom)
-    resp = tc.post("/github/find-buddies")
-    assert resp.status_code == 500
-    assert "Could not determine" in resp.json()["error"]
 
 
 def test_settings_route_persists_team_and_host(client):

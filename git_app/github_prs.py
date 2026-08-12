@@ -2,10 +2,16 @@
 
 Ported (not rewritten) from the monolith's
 ``agentic-workspace/src/api/routes/github.py`` / ``aw-backend`` twin, which
-served ``/api/github/prs``, ``/api/github/refresh``, ``/api/github/find-buddies``
-and ``/ws/github``. aw-workspace's core has no GitHub surface at all — those
-paths 404 on the workspace host — so the feature lives here, in the app that
-already owns ``gh`` (installs it, holds its token, logs it in).
+served ``/api/github/prs``, ``/api/github/refresh`` and ``/ws/github``.
+aw-workspace's core has no GitHub surface at all — those paths 404 on the
+workspace host — so the feature lives here, in the app that already owns
+``gh`` (installs it, holds its token, logs it in).
+
+Not ported: the monolith's buddy discovery (``find_buddies`` +
+``/api/github/find-buddies`` + the one-shot auto-discovery that wrote the
+guessed team back into config). It inferred a team from 3 months of PR
+history on every first poll — a dozen extra ``gh`` calls to guess at
+something the ``github_team`` setting says outright.
 
 What the port had to adapt to this architecture — everything else is the
 monolith's logic unchanged:
@@ -30,17 +36,10 @@ monolith's logic unchanged:
   has in :mod:`git_app.uncommitted_watchdog` (itself a copy of that same
   monolith function), so it reuses ``discover_repos()`` instead of a third copy.
 
-Three deliberate divergences, each a monolith bug that would have shipped as-is
-(marked ``DIVERGENCE`` at the site):
-
-1. PRs were only ever fetched when a ``team`` was configured — a fresh install
-   with no team saw an empty dashboard forever, including its own PRs.
-2. ``find_buddies``' early returns handed back a 3-tuple while the success path
-   returned a list, so the route's ``{"buddies": ...}`` changed shape on the
-   "no collaborators" path.
-3. ``find_buddies`` dropped every login without a ``-`` in it (an artefact of
-   one org's username convention) — which silently discards normal GitHub
-   logins like ``octocat``.
+One deliberate divergence, a monolith bug that would have shipped as-is
+(marked ``DIVERGENCE`` at the site): PRs were only ever fetched when a ``team``
+was configured — a fresh install with no team saw an empty dashboard forever,
+including its own PRs.
 """
 
 from __future__ import annotations
@@ -321,117 +320,16 @@ def fetch_repos(base_dir: str | None = None):
     return [git_status_for_repo(path, name) for name, path in discover_repos(base_dir)]
 
 
-def find_buddies(github_cfg):
-    """Find frequent PR collaborators from the last 3 months.
-
-    Strategy:
-    1. Search my PRs from last 3 months → extract reviewers
-    2. Search PRs I reviewed from last 3 months → extract authors
-    3. Count interactions, return top quadrant (above median)
-    """
-    from collections import Counter
-    from datetime import datetime, timedelta
-
-    host = github_cfg.get("host")
-    cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
-
-    me_raw = _run_gh(["api", "user", "--jq", ".login"], host=host)
-    if isinstance(me_raw, str):
-        me = me_raw.strip()
-    elif isinstance(me_raw, dict):
-        me = me_raw.get("login", "")
-    else:
-        result = subprocess.run(
-            ["gh", "api", "user", "--jq", ".login"],
-            capture_output=True, text=True, timeout=10,
-            env={**os.environ, **({"GH_HOST": host} if host else {})}
-        )
-        me = result.stdout.strip()
-
-    if not me:
-        raise RuntimeError("Could not determine GitHub username")
-
-    log.info("Finding buddies for %s (since %s)", me, cutoff)
-    interactions = Counter()
-
-    my_prs = _run_gh([
-        "search", "prs", "--author", "@me", "--merged",
-        "--created", f">={cutoff}",
-        "--json", "number,repository",
-        "--limit", "100",
-    ], host=host) or []
-
-    for pr in my_prs:
-        repo = (pr.get("repository") or {}).get("nameWithOwner", "")
-        number = pr.get("number")
-        if not repo or not number:
-            continue
-        reviews = _run_gh([
-            "pr", "view", str(number), "--repo", repo,
-            "--json", "reviews", "--jq", "[.reviews[].author.login]",
-        ], host=host)
-        if isinstance(reviews, list):
-            for reviewer in reviews:
-                if reviewer and reviewer != me:
-                    interactions[reviewer] += 1
-
-    reviewed = _run_gh([
-        "search", "prs", "--reviewed-by", "@me", "--merged",
-        "--created", f">={cutoff}",
-        "--json", "author,number",
-        "--limit", "100",
-    ], host=host) or []
-
-    for pr in reviewed:
-        author = (pr.get("author") or {}).get("login", "")
-        if author and author != me:
-            interactions[author] += 1
-
-    # DIVERGENCE 2: the monolith's early exits returned a 3-tuple ([], "", [])
-    # while the success path returns a list, so the caller's {"buddies": ...}
-    # changed shape depending on the outcome. A list either way.
-    if not interactions:
-        return []
-
-    # DIVERGENCE 3: the monolith dropped every login without a "-" — a filter
-    # tuned to one org's `first-last` username convention that throws away
-    # ordinary GitHub logins (octocat). Keep it as a PREFERENCE (org-style
-    # logins first when there are any) rather than a hard filter, so a
-    # personal account still discovers its collaborators.
-    org_style = Counter({k: v for k, v in interactions.items() if "-" in k})
-    if org_style:
-        interactions = org_style
-
-    counts = list(interactions.values())
-    n = len(counts)
-    mean = sum(counts) / n
-    variance = sum((c - mean) ** 2 for c in counts) / n
-    stddev = variance ** 0.5
-    q1_threshold = mean + 0.675 * stddev
-
-    all_collabs = [
-        {"name": name, "count": count, "q1": count >= q1_threshold}
-        for name, count in interactions.most_common()
-    ]
-
-    log.info("Found %d collaborators, Q1 threshold=%.1f (mean=%.1f, stddev=%.1f): %s",
-             len(interactions), q1_threshold, mean, stddev,
-             [c["name"] for c in all_collabs if c["q1"]][:10])
-
-    return all_collabs
-
-
 class PrWatchdog:
     """Polls GitHub PRs + repos on an interval, caches results, broadcasts to
     WebSocket listeners.
 
     ``load_cfg`` returns the current github settings dict (the plugin reads
     them from ``ctx.secrets``); ``notify`` is ``ctx.notify`` (or None when the
-    app lacks ``notifications:send``); ``save_team`` persists an auto-discovered
-    team (or None to skip discovery).
+    app lacks ``notifications:send``).
     """
 
-    def __init__(self, load_cfg, notify=None, save_team=None):
+    def __init__(self, load_cfg, notify=None):
         self._cache: dict[str, Any] = {
             "my_prs": [], "team_prs": [], "review_prs": [], "repos": [],
             "last_poll": 0, "error": None,
@@ -439,8 +337,6 @@ class PrWatchdog:
         self._listeners: set = set()
         self._load_cfg = load_cfg
         self._notify = notify
-        self._save_team = save_team
-        self._auto_discovery_done = False
         self._my_login: str | None = None
 
     def get_cached(self):
@@ -506,27 +402,6 @@ class PrWatchdog:
 
         self._cache["last_poll"] = time.time()
         await self._broadcast()
-
-        if not self._auto_discovery_done:
-            self._auto_discovery_done = True
-            if self._save_team and not (cfg.get("team") or []):
-                asyncio.create_task(self._auto_discover_team(cfg))
-
-    async def _auto_discover_team(self, cfg):
-        """One-time background auto-discovery of buddies, persisted via save_team."""
-        loop = asyncio.get_running_loop()
-        try:
-            buddies = await loop.run_in_executor(None, find_buddies, cfg)
-            if not buddies:
-                return
-            q1_buddies = [b["name"] for b in buddies if b["q1"]]
-            if not q1_buddies:
-                return
-            self._save_team(q1_buddies)
-            log.info("Auto-discovered %d team members: %s", len(q1_buddies), q1_buddies)
-            await self.poll()
-        except Exception as e:
-            log.warning("Auto team discovery failed: %s", e)
 
     def _detect_pr_changes(self, old_my, old_team, new_my, new_team, cfg=None):
         """Compare old vs new PRs and emit ninja notifications for meaningful changes."""

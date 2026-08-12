@@ -85,7 +85,7 @@
       },
       "github_team": {
         "type": "string",
-        "description": "PR dashboard: comma-separated GitHub logins whose open PRs are shown next to yours. Left empty, the app discovers your frequent collaborators once (from the last 3 months) and fills this in."
+        "description": "PR dashboard: comma-separated GitHub logins whose open PRs are shown next to yours. Left empty, only your own PRs and the ones awaiting your review are listed."
       },
       "github_host": {
         "type": "string",

@@ -193,19 +193,11 @@ class GitAppPlugin:
         except AttributeError:
             notify = None  # a ctx without the facade (tests) — no notifications
 
-        def _save_team(members: list[str]) -> None:
-            ctx.secrets.write("github_team", json.dumps(members))
-
-        self._prs = github_prs.PrWatchdog(
-            lambda: _github_cfg(ctx), notify=notify, save_team=_save_team
-        )
+        self._prs = github_prs.PrWatchdog(lambda: _github_cfg(ctx), notify=notify)
         return self._prs
 
     def _build_routes(self, ctx):
-        import asyncio
-
         from fastapi import Body, FastAPI
-        from fastapi.responses import JSONResponse
 
         api = FastAPI()
 
@@ -228,17 +220,6 @@ class GitAppPlugin:
             """Force a fresh poll."""
             await prs.poll()
             return prs.get_cached()
-
-        @api.post("/github/find-buddies")
-        async def find_buddies():
-            """Discover frequent PR collaborators from the last 3 months."""
-            loop = asyncio.get_running_loop()
-            try:
-                buddies = await loop.run_in_executor(
-                    None, github_prs.find_buddies, _github_cfg(ctx))
-                return {"buddies": buddies}
-            except Exception as e:
-                return JSONResponse(status_code=500, content={"error": str(e)})
 
         @api.websocket("/github/stream")
         async def github_stream(websocket: WebSocket):
