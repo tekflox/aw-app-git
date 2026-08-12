@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "git",
   "name": "Git + GitHub CLI",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, provides a settings panel for gh login (token stored in the zero-knowledge secret store), and serves the GitHub PR dashboard (open PRs for you and your team, plus repo status) the workspace nav reads.",
   "tier": "inprocess",
   "publisher": "TekFlox",
