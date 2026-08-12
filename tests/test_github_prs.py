@@ -90,7 +90,7 @@ def test_fetch_prs_dedupes_across_mine_team_and_review(monkeypatch):
     monkeypatch.setattr(github_prs, "search_review_requested", lambda host=None: [shared])
     monkeypatch.setattr(github_prs, "enrich_pr", lambda pr, host=None: pr)
 
-    my_prs, team_prs, review_prs = github_prs.fetch_prs({"team": ["buddy"]})
+    my_prs, team_prs, review_prs = github_prs.fetch_prs({"team": ["mate"]})
     assert [p["number"] for p in my_prs] == [1]
     assert [p["number"] for p in team_prs] == [2]   # `mine` skipped, already seen
     assert review_prs == []                         # `shared` already seen via team
@@ -147,7 +147,7 @@ def test_poll_skips_prs_when_not_logged_in(monkeypatch):
 
 def test_detect_changes_notifies_ready_to_merge_and_merged():
     events = []
-    wd = github_prs.PrWatchdog(lambda: {"team": ["buddy"]},
+    wd = github_prs.PrWatchdog(lambda: {"team": ["mate"]},
                                notify=lambda **kw: events.append(kw))
     url = "https://github.com/o/r/pull/1"
     old_my = {url: {"url": url, "badge": "needs-review", "state": "OPEN", "commentCount": 0}}

@@ -56,13 +56,12 @@ def _watchdog_interval_s(ctx) -> float:
 
 
 def _github_team(ctx) -> list[str]:
-    """The PR-dashboard's team list (buddy logins whose PRs are also shown).
+    """The PR-dashboard's team list (team logins whose PRs are also shown).
 
     Stored as JSON in ``ctx.secrets`` (app-writable) with install-time
     ``ctx.config`` as fallback, same precedence as :func:`_oauth_client_id`. A
     comma-separated string is accepted too — that's what a plain settings text
-    field posts, and what auto-discovery used to write into the monolith's
-    aw.json.
+    field posts.
     """
     raw = ctx.secrets.read("github_team")
     if raw is None:

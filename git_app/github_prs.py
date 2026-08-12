@@ -7,12 +7,6 @@ aw-workspace's core has no GitHub surface at all — those paths 404 on the
 workspace host — so the feature lives here, in the app that already owns
 ``gh`` (installs it, holds its token, logs it in).
 
-Not ported: the monolith's buddy discovery (``find_buddies`` +
-``/api/github/find-buddies`` + the one-shot auto-discovery that wrote the
-guessed team back into config). It inferred a team from 3 months of PR
-history on every first poll — a dozen extra ``gh`` calls to guess at
-something the ``github_team`` setting says outright.
-
 What the port had to adapt to this architecture — everything else is the
 monolith's logic unchanged:
 
@@ -410,12 +404,12 @@ class PrWatchdog:
             return
 
         cfg = cfg if cfg is not None else self._load_cfg()
-        buddy_logins = set(m.lower() for m in (cfg.get("team") or []))
+        team_logins = set(m.lower() for m in (cfg.get("team") or []))
 
         for pr in new_team:
             if pr["url"] not in old_team:
                 author = pr.get("author", "")
-                if author.lower() in buddy_logins:
+                if author.lower() in team_logins:
                     notify(
                         message=f"#{pr.get('number')} {pr.get('title', '')[:60]}",
                         level="info",
