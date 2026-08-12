@@ -40,11 +40,42 @@ def _data_dir() -> Path:
     return Path(home) / "data" / "git"
 
 
+def _write_in_place(dst: Path, data: bytes, mode: int = 0o600) -> None:
+    """Replace ``dst``'s CONTENT without replacing the file itself.
+
+    This has to preserve the inode. Every already-running agent container
+    bind-mounts these files individually (``data/git/config-gh/hosts.yml`` ->
+    ``~/.config/gh/hosts.yml``), and a bind mount resolves to an inode, not a
+    path: unlink-and-recreate leaves those containers mounted on a deleted
+    inode, so their ``~/.config/gh`` silently goes empty mid-session and gh
+    reports "not logged in" even though the login succeeded. Observed live
+    2026-08-12, twice, and it reads exactly like a failed login.
+
+    ``open(..., "r+b")`` + truncate keeps the inode; the file is only created
+    (new inode, unavoidable and harmless — nothing is mounted on it yet) when
+    it doesn't exist.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        with open(dst, "r+b") as f:
+            f.write(data)
+            f.truncate()
+    else:
+        with open(dst, "wb") as f:
+            f.write(data)
+        os.chmod(dst, mode)
+
+
 def _sync_creds_to_data_dir() -> None:
     """Best-effort mirror of `~/.config/gh` + `~/.gitconfig` into this app's
     data dir. Never raises — a failure here must not fail the login/logout
     call it's attached to; the settings panel already confirmed gh's own
-    auth succeeded, that's the source of truth for "are we logged in"."""
+    auth succeeded, that's the source of truth for "are we logged in".
+
+    Copies file-by-file **in place** rather than rmtree+copytree: see
+    ``_write_in_place`` for why replacing these files breaks every container
+    already mounting them.
+    """
     try:
         dst_root = _data_dir()
         dst_root.mkdir(parents=True, exist_ok=True)
@@ -52,12 +83,22 @@ def _sync_creds_to_data_dir() -> None:
         src_gh = Path.home() / ".config" / "gh"
         if src_gh.is_dir():
             dst_gh = dst_root / "config-gh"
-            shutil.rmtree(dst_gh, ignore_errors=True)
-            shutil.copytree(src_gh, dst_gh)
+            dst_gh.mkdir(parents=True, exist_ok=True)
+            copied = set()
+            for src in src_gh.iterdir():
+                if not src.is_file():
+                    continue
+                copied.add(src.name)
+                _write_in_place(dst_gh / src.name, src.read_bytes())
+            # Drop mirrored files gh itself no longer has. Nothing can be
+            # mounted on a file the source deleted, so unlinking is safe here.
+            for stale in dst_gh.iterdir():
+                if stale.is_file() and stale.name not in copied:
+                    stale.unlink(missing_ok=True)
 
         src_gitconfig = Path.home() / ".gitconfig"
         if src_gitconfig.is_file():
-            shutil.copyfile(src_gitconfig, dst_root / "gitconfig")
+            _write_in_place(dst_root / "gitconfig", src_gitconfig.read_bytes(), mode=0o644)
     except Exception:
         pass
 
@@ -65,11 +106,23 @@ def _sync_creds_to_data_dir() -> None:
 def _clear_creds_from_data_dir() -> None:
     """Reverses `_sync_creds_to_data_dir()` — called on logout so a revoked
     login doesn't leave a stale, still-working copy sitting in the data dir
-    for spawned agent containers to keep picking up."""
+    for spawned agent containers to keep picking up.
+
+    Empties the files instead of deleting them, for the same inode reason as
+    ``_write_in_place``: a logged-out agent container should see an empty gh
+    config (and correctly report "not logged in"), not a mount pointing at a
+    deleted inode. The credential is just as gone either way.
+    """
     try:
         dst_root = _data_dir()
-        shutil.rmtree(dst_root / "config-gh", ignore_errors=True)
-        (dst_root / "gitconfig").unlink(missing_ok=True)
+        dst_gh = dst_root / "config-gh"
+        if dst_gh.is_dir():
+            for path in dst_gh.iterdir():
+                if path.is_file():
+                    _write_in_place(path, b"")
+        gitconfig = dst_root / "gitconfig"
+        if gitconfig.is_file():
+            _write_in_place(gitconfig, b"", mode=0o644)
     except Exception:
         pass
 

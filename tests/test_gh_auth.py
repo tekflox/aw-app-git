@@ -129,8 +129,46 @@ def test_logout_clears_synced_creds(monkeypatch, tmp_path):
     monkeypatch.setattr(gh_auth.subprocess, "run", fake_run)
     gh_auth.logout()
 
-    assert not (data_dir / "config-gh").exists()
-    assert not (data_dir / "gitconfig").exists()
+    # Emptied, not deleted: an agent container bind-mounts these files by
+    # inode, so unlinking them leaves it mounted on a deleted inode instead
+    # of on an empty (correctly "logged out") config. The credential is gone
+    # either way, which is what actually matters.
+    assert (data_dir / "config-gh" / "hosts.yml").read_text() == ""
+    assert (data_dir / "gitconfig").read_text() == ""
+
+
+def test_sync_writes_in_place_so_open_handles_see_the_update(monkeypatch, tmp_path):
+    """Models what a bind mount does: it resolves to the file OBJECT, not the
+    path. A handle opened before the re-mirror must observe the new content.
+
+    Asserting on st_ino instead would be useless — a filesystem readily
+    reuses the inode number it just freed, so an unlink+create passes that
+    check by luck (verified: it does). Reading through a pre-opened handle
+    cannot be fooled that way, and it is exactly the failure seen live: the
+    container kept its handle on the replaced file and its ~/.config/gh went
+    empty.
+    """
+    workspace_home = tmp_path / "workspace-home"
+    data_dir = workspace_home / "data" / "git"
+    (data_dir / "config-gh").mkdir(parents=True)
+    mirrored = data_dir / "config-gh" / "hosts.yml"
+    mirrored.write_text("old token")
+    monkeypatch.setenv("AW_WORKSPACE_HOME", str(workspace_home))
+
+    home = tmp_path / "home"
+    (home / ".config" / "gh").mkdir(parents=True)
+    (home / ".config" / "gh" / "hosts.yml").write_text("new token")
+    monkeypatch.setattr(gh_auth.Path, "home", staticmethod(lambda: home))
+
+    with open(mirrored, "rb") as mounted:      # stands in for the container
+        gh_auth._sync_creds_to_data_dir()
+        mounted.seek(0)
+        seen = mounted.read().decode()
+
+    assert seen == "new token", (
+        "the mirrored file was replaced, not rewritten — every container "
+        "already mounting it is now stuck on the old (deleted) file"
+    )
 
 
 def test_configure_git_identity_does_not_clobber_existing(monkeypatch):
