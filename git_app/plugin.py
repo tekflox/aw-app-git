@@ -132,8 +132,14 @@ class GitAppPlugin:
         with open(os.path.join(ctx.package_dir, "aw-app.json"), encoding="utf-8") as f:
             manifest = json.load(f)
         for cli in manifest.get("contributes", {}).get("system_clis", []):
+            # `verify` from the manifest decides what "installed" means for
+            # this CLI. git needs one: a binary shipped without its remote
+            # helpers is on PATH and prints a version while every https://
+            # operation fails, which is how a broken git survived unnoticed
+            # long enough to take nvm/node/yarn/pnpm down with it (2026-08-12).
             ctx.commands.install_system_cli(
-                cli["name"], cli["installer"], uninstall="scripts/uninstall.sh"
+                cli["name"], cli["installer"], uninstall="scripts/uninstall.sh",
+                verify=cli.get("verify"),
             )
         log.info("aw-app-git activated: git + gh installed")
 

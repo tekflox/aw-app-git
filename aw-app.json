@@ -37,12 +37,14 @@
       {
         "name": "git",
         "installer": "scripts/install_git.sh",
-        "version": ">=2.30"
+        "version": ">=2.30",
+        "verify": "test -x \"$(git --exec-path)/git-remote-https\""
       },
       {
         "name": "gh",
         "installer": "scripts/install_gh.sh",
-        "version": ">=2.40"
+        "version": ">=2.40",
+        "verify": "gh --version"
       }
     ],
     "windows": [
