@@ -7,6 +7,7 @@ Run: .venv/aw/bin/python -m pytest tests/test_plugin_routes.py
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -272,3 +273,92 @@ def test_logout_reports_gh_error(client, monkeypatch):
     body = resp.json()
     assert body["ok"] is False
     assert "not logged in" in body["error"]
+
+
+# ---- /pull, /push (Workspace > Repos nav) ------------------------------
+# Real local git repos with a bare "remote" — no network, no gh CLI needed.
+
+
+def _git(*args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _bare_and_clone(tmp_path, name):
+    bare = tmp_path / "origin.git"
+    if not bare.exists():
+        subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    work = tmp_path / name
+    subprocess.run(["git", "clone", "-q", str(bare), str(work)], check=True)
+    _git("config", "user.email", "test@example.com", cwd=work)
+    _git("config", "user.name", "Test", cwd=work)
+    return bare, work
+
+
+def _commit_and_push(work, filename, content):
+    (work / filename).write_text(content)
+    _git("add", ".", cwd=work)
+    _git("commit", "-q", "-m", f"add {filename}", cwd=work)
+    _git("push", "-q", "-u", "origin", "HEAD", cwd=work)
+
+
+def test_pull_rejects_unresolvable_path(client):
+    tc, _ = client
+    resp = tc.post("/pull", json={"repo": "/nowhere/not-a-repo"})
+    assert resp.status_code == 400
+    assert resp.json()["success"] is False
+
+
+def test_pull_fetches_new_commit(client, tmp_path):
+    tc, _ = client
+    _, work_a = _bare_and_clone(tmp_path, "work_a")
+    _commit_and_push(work_a, "README.md", "hello\n")
+    _, work_b = _bare_and_clone(tmp_path, "work_b")
+
+    _commit_and_push(work_a, "second.txt", "more\n")
+
+    resp = tc.post("/pull", json={"repo": str(work_b)})
+    body = resp.json()
+    assert body["success"] is True
+    assert (work_b / "second.txt").exists()
+
+
+def test_push_rejects_unresolvable_path(client):
+    tc, _ = client
+    resp = tc.post("/push", json={"repo": "/nowhere/not-a-repo"})
+    assert resp.status_code == 400
+    assert resp.json()["success"] is False
+
+
+def test_push_sends_new_commit_to_remote(client, tmp_path):
+    tc, _ = client
+    bare, work = _bare_and_clone(tmp_path, "work")
+    _commit_and_push(work, "README.md", "hello\n")
+
+    (work / "new.txt").write_text("pushed\n")
+    _git("add", ".", cwd=work)
+    _git("commit", "-q", "-m", "add new.txt", cwd=work)
+
+    resp = tc.post("/push", json={"repo": str(work)})
+    body = resp.json()
+    assert body["success"] is True
+
+    verify_dir = tmp_path / "verify"
+    subprocess.run(["git", "clone", "-q", str(bare), str(verify_dir)], check=True)
+    assert (verify_dir / "new.txt").exists()
+
+
+def test_push_reports_git_error(client, tmp_path):
+    tc, _ = client
+    work = tmp_path / "no_remote"
+    work.mkdir()
+    _git("init", "-q", cwd=work)
+    _git("config", "user.email", "test@example.com", cwd=work)
+    _git("config", "user.name", "Test", cwd=work)
+    (work / "a.txt").write_text("x\n")
+    _git("add", ".", cwd=work)
+    _git("commit", "-q", "-m", "init", cwd=work)
+
+    resp = tc.post("/push", json={"repo": str(work)})
+    body = resp.json()
+    assert body["success"] is False
+    assert "push failed" in body["error"]

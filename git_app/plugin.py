@@ -16,9 +16,11 @@ rather than raw shell:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import subprocess
 
 # Module level, unlike the other fastapi imports (which stay local to
 # _build_routes): this file uses `from __future__ import annotations`, so a
@@ -126,6 +128,56 @@ def _oauth_client_id(ctx) -> str:
     ).strip()
 
 
+def _resolve_repo_path(value: str) -> str | None:
+    """Map any of the forms the Repos nav sends to an absolute git repo path.
+
+    Mirrors aw-app-diff-tool's ``diff_app/repo_paths.py::resolve_repo_path``
+    (itself ported from the monolith's ``git_ops.py``) — same normalization,
+    pointed at this app's own ``uncommitted_watchdog.workspace_root()``.
+
+    Accepts:
+      - absolute path  -> used as-is if it's a git repo
+      - bare workspace name ("aw-workspace") -> workspace root
+      - bare child name ("vpn", "resume") -> <root>/repos/<name>
+      - relative path -> resolved against the workspace root
+
+    Returns the absolute path if it points to a git repo, otherwise None.
+    """
+    if not value:
+        return None
+    base_dir = uncommitted_watchdog.workspace_root()
+    if os.path.isabs(value):
+        return value if os.path.isdir(os.path.join(value, ".git")) else None
+    if value == os.path.basename(os.path.normpath(base_dir)):
+        candidate = base_dir
+        if os.path.isdir(os.path.join(candidate, ".git")):
+            return candidate
+    if "/" not in value:
+        candidate = os.path.join(base_dir, "repos", value)
+        if os.path.isdir(os.path.join(candidate, ".git")):
+            return candidate
+    candidate = os.path.normpath(os.path.join(base_dir, value))
+    if os.path.isdir(os.path.join(candidate, ".git")):
+        return candidate
+    return None
+
+
+def _run_git_steps(repo_path: str, steps: list[tuple[list[str], str]]) -> dict:
+    """Runs ``steps`` (``[(argv, error_label), ...]``) in ``repo_path``,
+    stopping at the first failure. Shared by ``/pull`` (fetch + pull) and
+    ``/push`` (a single step) so both report the same shape."""
+    output = ""
+    for argv, label in steps:
+        result = subprocess.run(
+            argv, capture_output=True, text=True, cwd=repo_path, timeout=60,
+        )
+        if result.returncode != 0:
+            return {"success": False, "error": f"{label}: {result.stderr.strip()}",
+                    "output": result.stdout.strip()}
+        output = result.stdout.strip()
+    return {"success": True, "output": output or "Already up to date."}
+
+
 class GitAppPlugin:
     async def activate(self, ctx) -> None:
         self.ctx = ctx
@@ -203,8 +255,43 @@ class GitAppPlugin:
 
     def _build_routes(self, ctx):
         from fastapi import Body, FastAPI
+        from fastapi.responses import JSONResponse
 
         api = FastAPI()
+
+        # ---- Repo pull/push (Workspace > Repos nav) ----
+        # Ported from the monolith's src/api/routes/git_ops.py::pull, plus a
+        # new push, moved here (instead of aw-workspace core) so they hot-reload
+        # with this app and need no core restart. Auth is whatever `git`/`gh`
+        # already have configured globally: gh_auth.login_with_token() runs
+        # `gh auth setup-git` on sign-in, which wires plain `git push`/`pull`
+        # through gh's own credential helper — nothing new to configure here.
+
+        async def _git_op(data: dict, steps: list[tuple[list[str], str]]):
+            repo_path = _resolve_repo_path(data.get("repo", ""))
+            if not repo_path:
+                return JSONResponse(
+                    {"success": False, "error": f"Not a git repo: {data.get('repo', '')}"},
+                    status_code=400,
+                )
+            loop = asyncio.get_event_loop()
+            try:
+                return await loop.run_in_executor(None, _run_git_steps, repo_path, steps)
+            except subprocess.TimeoutExpired:
+                return JSONResponse({"success": False, "error": "Git operation timed out"}, status_code=504)
+            except Exception as e:
+                return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+        @api.post("/pull")
+        async def git_pull(data: dict = Body(...)):
+            return await _git_op(data, [
+                (["git", "fetch", "--all", "--prune"], "git fetch failed"),
+                (["git", "pull"], "git pull failed"),
+            ])
+
+        @api.post("/push")
+        async def git_push(data: dict = Body(...)):
+            return await _git_op(data, [(["git", "push"], "git push failed")])
 
         # ---- GitHub PR dashboard (ported from the monolith's /api/github/*) ----
         # Same payloads, same semantics; only the prefix moves, from the core's
