@@ -21,3 +21,5 @@ Install the app, open its settings, and sign in to GitHub. Once authenticated, u
 ## What It Delivers
 
 The app gives AW Workspace a dependable source-control setup. It makes repository operations available to users and agents without requiring separate manual installation.
+
+<!-- fleet migration batch 5: CI loop verification no-op -->
