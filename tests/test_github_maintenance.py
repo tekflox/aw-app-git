@@ -673,3 +673,74 @@ def test_watchdog_poll_never_raises_on_an_unreadable_repos_dir_and_records_the_e
     assert cached["last_poll"] == NOW
     assert cached["error"] is not None
     assert "unreadable" in cached["error"]
+
+
+# ── ping-gate planning (pure — route-level slice) ───────────────────────
+
+def _flow(repo="o/r", workflow="ci", **over):
+    flow = {"repo": repo, "workflow": workflow, "default_branch": "main",
+            "latest_run_url": f"https://github.com/{repo}/actions/runs/1",
+            "conclusion": "failure", "consecutive_failures": 1}
+    flow.update(over)
+    return flow
+
+
+def test_flow_key_is_repo_colon_workflow():
+    assert gm.flow_key(_flow(repo="o/r", workflow="ci")) == "o/r:ci"
+
+
+def test_plan_pings_a_brand_new_failure_is_reported_and_stamped():
+    plan = gm.plan_maintenance_pings([_flow()], {}, NOW)
+    assert [gm.flow_key(f) for f in plan["new_failures"]] == ["o/r:ci"]
+    assert plan["state"]["failing"]["o/r:ci"]["first_seen_at"] == NOW
+
+
+def test_plan_pings_an_already_surfaced_failure_does_not_renotify():
+    state = {"failing": {"o/r:ci": {"first_seen_at": NOW - 3600}}}
+    plan = gm.plan_maintenance_pings([_flow()], state, NOW)
+    assert plan["new_failures"] == []
+    # still present in the next state — an ongoing failure isn't cleared
+    assert "o/r:ci" in plan["state"]["failing"]
+
+
+def test_plan_pings_a_cleared_flow_is_dropped_from_state_with_no_notification():
+    state = {"failing": {"o/r:ci": {"first_seen_at": NOW - 3600}}}
+    plan = gm.plan_maintenance_pings([], state, NOW)  # flow went green
+    assert plan["new_failures"] == []
+    assert plan["state"]["failing"] == {}
+
+
+def test_plan_pings_a_cleared_then_refailed_flow_renotifies():
+    """The full SET → CLEAR → re-SET lifecycle the card requires tested
+    explicitly: a flow that goes green and then fails again is news again,
+    gated strictly on the store transition rather than on raw failing state."""
+    state = {}
+    plan1 = gm.plan_maintenance_pings([_flow()], state, NOW)
+    assert [gm.flow_key(f) for f in plan1["new_failures"]] == ["o/r:ci"]
+
+    plan2 = gm.plan_maintenance_pings([], plan1["state"], NOW + 60)  # went green
+    assert plan2["new_failures"] == []
+    assert plan2["state"]["failing"] == {}
+
+    plan3 = gm.plan_maintenance_pings([_flow()], plan2["state"], NOW + 120)  # fails again
+    assert [gm.flow_key(f) for f in plan3["new_failures"]] == ["o/r:ci"]
+
+
+def test_plan_pings_daily_summary_skipped_when_no_failing_flows():
+    plan = gm.plan_maintenance_pings([], {}, NOW)
+    assert plan["summary_due"] is False
+    assert plan["state"]["last_summary_at"] is None
+
+
+def test_plan_pings_daily_summary_fires_once_then_waits_24h():
+    plan1 = gm.plan_maintenance_pings([_flow()], {}, NOW)
+    assert plan1["summary_due"] is True
+    assert plan1["state"]["last_summary_at"] == NOW
+
+    plan2 = gm.plan_maintenance_pings([_flow()], plan1["state"], NOW + 3600)  # 1h later
+    assert plan2["summary_due"] is False
+    assert plan2["state"]["last_summary_at"] == NOW  # unchanged
+
+    plan3 = gm.plan_maintenance_pings([_flow()], plan2["state"], NOW + 25 * 3600)  # >24h later
+    assert plan3["summary_due"] is True
+    assert plan3["state"]["last_summary_at"] == NOW + 25 * 3600

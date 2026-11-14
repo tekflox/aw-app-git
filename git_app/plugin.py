@@ -21,6 +21,14 @@ import json
 import logging
 import os
 import subprocess
+import time
+
+# A local name, not ``time.time`` itself — monkeypatching the real stdlib
+# ``time`` module (as a naive ``monkeypatch.setattr(plugin.time, "time",
+# ...)`` would) mutates it process-wide, which also feeds httpx/cookiejar's
+# OWN internal `time.time()` calls inside a TestClient request and starves
+# a test's fake clock sequence. Patching this name only affects this module.
+_now_s = time.time
 
 # Module level, unlike the other fastapi imports (which stay local to
 # _build_routes): this file uses `from __future__ import annotations`, so a
@@ -276,7 +284,7 @@ class GitAppPlugin:
         return self._maintenance
 
     def _build_routes(self, ctx):
-        from fastapi import Body, FastAPI
+        from fastapi import Body, FastAPI, Query
         from fastapi.responses import JSONResponse
 
         api = FastAPI()
@@ -334,6 +342,132 @@ class GitAppPlugin:
             """Force a fresh poll."""
             await prs.poll()
             return prs.get_cached()
+
+        # ---- GitHub Maintenance gate (card 4185bf3b-9510-81c5, slice 2 of
+        # the GitHub Maintenance Plan) ----
+        # Thin sync wrapper over MaintenanceWatchdog's cache (slice 1,
+        # PR#6) — no new scan logic here. Precedent: aw-app-notion's
+        # GET /kanban/cards-need-attention.
+        maintenance = self._maintenance_watchdog(ctx)
+
+        def _ping_maintenance(failing_flows: list) -> "dict | None":
+            """The reping pattern: pure decision logic lives in
+            ``github_maintenance.plan_maintenance_pings`` (testable without
+            ``ctx`` or a filesystem); this does the I/O that function can't
+            — notifying and persisting the SET/CLEAR + daily-summary state.
+            Called ONLY when ``ping=true`` (see ``get_maintenance`` below)
+            — a plain GET never reaches this function.
+
+            Any failure here (the notify backend down, a state-file write
+            error) is caught and reported as ``None`` rather than raised —
+            code-review finding (PR #7 round 2): this is a best-effort
+            side-channel on top of an already-successfully-computed
+            has_work/prs/counts response, and must never turn that healthy
+            read into a 500 the way the route's own deliberate 502 (``cached
+            .get("error")``) is reserved for an actually broken scan."""
+            state_path = github_maintenance.default_ping_state_path()
+            try:
+                # Lock held for the FULL load → decide → notify → write
+                # cycle (code-review finding, PR #7 round 2) — a lock
+                # around only load/save still lets two concurrent callers
+                # each independently decide the same flow is "new" before
+                # either persists.
+                with github_maintenance.locked_store(state_path):
+                    state = github_maintenance.load_surfaced_store(state_path)
+                    now_ts = _now_s()
+                    plan = github_maintenance.plan_maintenance_pings(failing_flows, state, now_ts)
+
+                    try:
+                        notify = ctx.notify if ctx.has("notifications:send") else None
+                    except AttributeError:
+                        notify = None  # a ctx without the facade (tests) — no notifications
+
+                    if notify is not None:
+                        for flow in plan["new_failures"]:
+                            # external_id folds in the SET's own timestamp —
+                            # code-review finding (PR #7 round 1/2 HIGH): the
+                            # real NotificationDB.has_notification dedups on
+                            # the bare (source, external_id, external_status)
+                            # triple FOREVER (its only purge is a one-time
+                            # 7-day cleanup at process boot), so a constant
+                            # id per flow key would silently swallow every
+                            # notify after the first real occurrence —
+                            # defeating the whole SET/CLEAR/re-notify design
+                            # this route exists to ship.
+                            notify(
+                                message=f"{flow.get('workflow')} failing on {flow.get('repo')} "
+                                        f"({flow.get('consecutive_failures', 0)} consecutive run(s))",
+                                level="error",
+                                title="GitHub workflow failing",
+                                url=flow.get("latest_run_url") or "",
+                                external_id=f"ci:{github_maintenance.flow_key(flow)}:{int(now_ts)}",
+                                external_status="failing",
+                            )
+                        if plan["summary_due"]:
+                            names = ", ".join(github_maintenance.flow_key(f) for f in failing_flows[:10])
+                            notify(
+                                message=f"{len(failing_flows)} failing workflow(s): {names}",
+                                level="warning",
+                                title="GitHub Maintenance — daily summary",
+                                external_status="summary",
+                            )
+
+                    github_maintenance.save_surfaced_store(state_path, plan["state"])
+            except Exception:
+                log.exception("github maintenance ping (notify/persist) failed")
+                return None
+            return {
+                "instant_sent": [github_maintenance.flow_key(f) for f in plan["new_failures"]],
+                "daily_summary_sent": bool(plan["summary_due"]),
+            }
+
+        @api.get("/github/maintenance")
+        async def get_maintenance(limit: int = Query(20, ge=0), ping: bool = False):
+            """Sync gate on the GitHub Maintenance scan cache. ``has_work``
+            = any attention PR OR any failing flow. Non-2xx when the scan
+            layer itself is broken (a top-level ``scan_maintenance``
+            failure, not a per-owner/per-repo error already reported
+            in-band via ``errors``/``counts``) — so the dag Workflow's http
+            gate node can tell "no work" from "broken" instead of reading a
+            failed scan as a healthy, quiet one.
+
+            Cold-cache fallback: a fresh deploy/restart has never polled
+            (``last_poll == 0``) — poll inline once rather than ever
+            answering ``has_work=false`` before a single real scan ran.
+
+            ``ping`` defaults to False, same invariant as cards-need-
+            attention's own ``reping``: a plain GET stays a pure read. Only
+            ``ping=true`` (the Workflow's gate node) fires the instant/daily
+            notifications, synchronously, inside this handler.
+            """
+            cached = maintenance.get_cached()
+            if not cached["last_poll"]:
+                await maintenance.poll()
+                cached = maintenance.get_cached()
+
+            if cached.get("error"):
+                return JSONResponse({"has_work": False, "error": cached["error"]}, status_code=502)
+
+            prs_list = cached.get("prs") or []
+            failing_flows = cached.get("failing_flows") or []
+            counts = cached.get("counts") or {}
+
+            result = {
+                "has_work": bool(prs_list) or bool(failing_flows),
+                "prs": prs_list[:limit],
+                "failing_flows": failing_flows[:limit],
+                "counts": {
+                    "prs": len(prs_list),
+                    "failing_flows": len(failing_flows),
+                    "scanned_repos": counts.get("scanned_repos", 0),
+                    "truncated": bool(counts.get("truncated")),
+                },
+            }
+            if ping:
+                pings = _ping_maintenance(failing_flows)
+                if pings is not None:
+                    result["pings"] = pings
+            return result
 
         @api.websocket("/github/stream")
         async def github_stream(websocket: WebSocket):
