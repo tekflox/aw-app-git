@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 
 # Module level, unlike the other fastapi imports (which stay local to
 # _build_routes): this file uses `from __future__ import annotations`, so a
@@ -334,6 +335,104 @@ class GitAppPlugin:
             """Force a fresh poll."""
             await prs.poll()
             return prs.get_cached()
+
+        # ---- GitHub Maintenance gate (card 4185bf3b-9510-81c5, slice 2 of
+        # the GitHub Maintenance Plan) ----
+        # Thin sync wrapper over MaintenanceWatchdog's cache (slice 1,
+        # PR#6) — no new scan logic here. Precedent: aw-app-notion's
+        # GET /kanban/cards-need-attention.
+        maintenance = self._maintenance_watchdog(ctx)
+
+        def _ping_maintenance(failing_flows: list) -> dict:
+            """The reping pattern: pure decision logic lives in
+            ``github_maintenance.plan_maintenance_pings`` (testable without
+            ``ctx`` or a filesystem); this does the I/O that function can't
+            — notifying and persisting the SET/CLEAR + daily-summary state.
+            Called ONLY when ``ping=true`` (see ``get_maintenance`` below)
+            — a plain GET never reaches this function."""
+            state_path = github_maintenance.default_ping_state_path()
+            # Generic atomic JSON-dict load/save — the same helper the
+            # surfaced-PR back-off store uses, just pointed at a different
+            # file (this route's own ping-gate state, not the scan's).
+            state = github_maintenance.load_surfaced_store(state_path)
+            plan = github_maintenance.plan_maintenance_pings(failing_flows, state, time.time())
+
+            try:
+                notify = ctx.notify if ctx.has("notifications:send") else None
+            except AttributeError:
+                notify = None  # a ctx without the facade (tests) — no notifications
+
+            if notify is not None:
+                for flow in plan["new_failures"]:
+                    notify(
+                        message=f"{flow.get('workflow')} failing on {flow.get('repo')} "
+                                f"({flow.get('consecutive_failures', 0)} consecutive run(s))",
+                        level="error",
+                        title="GitHub workflow failing",
+                        url=flow.get("latest_run_url") or "",
+                        external_id=f"ci:{github_maintenance.flow_key(flow)}",
+                        external_status="failing",
+                    )
+                if plan["summary_due"]:
+                    names = ", ".join(github_maintenance.flow_key(f) for f in failing_flows[:10])
+                    notify(
+                        message=f"{len(failing_flows)} failing workflow(s): {names}",
+                        level="warning",
+                        title="GitHub Maintenance — daily summary",
+                        external_status="summary",
+                    )
+
+            github_maintenance.save_surfaced_store(state_path, plan["state"])
+            return {
+                "instant_sent": [github_maintenance.flow_key(f) for f in plan["new_failures"]],
+                "daily_summary_sent": bool(plan["summary_due"]),
+            }
+
+        @api.get("/github/maintenance")
+        async def get_maintenance(limit: int = 20, ping: bool = False):
+            """Sync gate on the GitHub Maintenance scan cache. ``has_work``
+            = any attention PR OR any failing flow. Non-2xx when the scan
+            layer itself is broken (a top-level ``scan_maintenance``
+            failure, not a per-owner/per-repo error already reported
+            in-band via ``errors``/``counts``) — so the dag Workflow's http
+            gate node can tell "no work" from "broken" instead of reading a
+            failed scan as a healthy, quiet one.
+
+            Cold-cache fallback: a fresh deploy/restart has never polled
+            (``last_poll == 0``) — poll inline once rather than ever
+            answering ``has_work=false`` before a single real scan ran.
+
+            ``ping`` defaults to False, same invariant as cards-need-
+            attention's own ``reping``: a plain GET stays a pure read. Only
+            ``ping=true`` (the Workflow's gate node) fires the instant/daily
+            notifications, synchronously, inside this handler.
+            """
+            cached = maintenance.get_cached()
+            if not cached["last_poll"]:
+                await maintenance.poll()
+                cached = maintenance.get_cached()
+
+            if cached.get("error"):
+                return JSONResponse({"has_work": False, "error": cached["error"]}, status_code=502)
+
+            prs_list = cached.get("prs") or []
+            failing_flows = cached.get("failing_flows") or []
+            counts = cached.get("counts") or {}
+
+            result = {
+                "has_work": bool(prs_list) or bool(failing_flows),
+                "prs": prs_list[:limit],
+                "failing_flows": failing_flows[:limit],
+                "counts": {
+                    "prs": len(prs_list),
+                    "failing_flows": len(failing_flows),
+                    "scanned_repos": counts.get("scanned_repos", 0),
+                    "truncated": bool(counts.get("truncated")),
+                },
+            }
+            if ping:
+                result["pings"] = _ping_maintenance(failing_flows)
+            return result
 
         @api.websocket("/github/stream")
         async def github_stream(websocket: WebSocket):

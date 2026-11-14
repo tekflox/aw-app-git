@@ -315,6 +315,74 @@ def save_surfaced_store(path: str, store: dict) -> None:
         raise
 
 
+PING_STATE_REL = "data/git/github_maintenance_state.json"
+
+DEFAULT_PING_SUMMARY_INTERVAL_HOURS = 24.0
+
+
+def default_ping_state_path() -> str:
+    """A SEPARATE file from :func:`default_store_path` above: that one is
+    the scan's own surfaced-PR back-off store; this one belongs to the gate
+    route's ``ping=true`` handler (next slice) — the SET/CLEAR state for
+    failing-flow instant notifications plus the daily-summary stamp. Same
+    ``AW_WORKSPACE_HOME`` root, different concern, different lifetime."""
+    home = os.environ.get("AW_WORKSPACE_HOME") or os.path.expanduser("~/.aw-workspace")
+    return os.path.join(home, PING_STATE_REL)
+
+
+def flow_key(flow: dict) -> str:
+    return f"{flow.get('repo')}:{flow.get('workflow')}"
+
+
+def plan_maintenance_pings(failing_flows: list, state: dict, now: float, *,
+                           summary_interval_hours: float = DEFAULT_PING_SUMMARY_INTERVAL_HOURS) -> dict:
+    """Pure — no ``ctx.notify``, no file I/O — so the SET/CLEAR/daily-summary
+    decision is testable on its own. The caller (the gate route's
+    ``ping=true`` handler, the only place with a real ``ctx``) fires the
+    notifications this plans and persists the returned ``state``.
+
+    Two independent rules (Architect design, parent card 4185bf3b-9510-81fc,
+    section 5):
+
+    * **Instant, per flow**: a failing-flow key (:func:`flow_key`) not
+      already in ``state["failing"]`` is a NEW failure — reported in
+      ``new_failures`` for notification, and recorded (``first_seen_at``)
+      in the returned state. A key already present does NOT re-notify (an
+      ongoing failure isn't news). A key that WAS present but is no longer
+      in ``failing_flows`` is CLEARed from the returned state with no
+      notification of its own — that clear is what lets the SAME key
+      notify again the next time it fails (gated strictly on this
+      SET/CLEAR transition, not on the raw failing/not-failing state).
+    * **Daily summary**: at most once per ``summary_interval_hours``, and
+      only when ``failing_flows`` is non-empty — stamped via
+      ``last_summary_at`` in the same state dict.
+    """
+    current = {flow_key(f): f for f in failing_flows}
+    prior_failing = dict(state.get("failing") or {})
+
+    new_failures = [f for key, f in current.items() if key not in prior_failing]
+
+    next_failing = {key: prior_failing[key] for key in prior_failing if key in current}
+    for key, f in current.items():
+        if key not in next_failing:
+            next_failing[key] = {"first_seen_at": now}
+
+    last_summary_at = state.get("last_summary_at")
+    summary_due = bool(failing_flows) and (
+        last_summary_at is None
+        or (now - last_summary_at) >= summary_interval_hours * 3600.0
+    )
+
+    return {
+        "new_failures": new_failures,
+        "summary_due": summary_due,
+        "state": {
+            "failing": next_failing,
+            "last_summary_at": now if summary_due else last_summary_at,
+        },
+    }
+
+
 def prune_surfaced_store(store: dict, open_pr_keys: "set[str]", *,
                          searched_owners: "set[str] | None" = None) -> dict:
     """Keys no longer in the open-PR set are dropped, keeping the file
@@ -700,4 +768,6 @@ __all__ = [
     "analyze_workflow_runs", "scan_repo_failing_workflows", "scan_maintenance",
     "MaintenanceWatchdog", "DEFAULT_STALL_HOURS", "SURFACE_BACKOFF_CEILING_HOURS",
     "DEFAULT_POLL_INTERVAL_S", "ATTENTION_BADGES",
+    "default_ping_state_path", "flow_key", "plan_maintenance_pings",
+    "DEFAULT_PING_SUMMARY_INTERVAL_HOURS",
 ]
