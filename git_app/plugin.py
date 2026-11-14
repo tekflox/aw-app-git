@@ -317,7 +317,7 @@ class GitAppPlugin:
             # per-worker-process (``self._maintenance`` on this plugin
             # instance), and activate() re-runs on EVERY worker on every
             # deploy/reconcile — confirmed live, 10 activate/deactivate
-            # pairs within the same deploy. With run_immediately=True, all
+            # pairs within the same deploy. With run_immediately=False, all
             # 10 workers' caches went cold simultaneously and only warmed on
             # the next real request to land on each one (an unlucky one
             # eating the full ~38s scan inline) or after this task's own
