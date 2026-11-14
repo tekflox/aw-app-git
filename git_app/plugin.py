@@ -373,7 +373,22 @@ class GitAppPlugin:
             same ``fcntl.flock``. This doesn't reopen the SET/CLEAR race the
             lock exists for — by the time any other caller can acquire the
             lock, this call's ``save_surfaced_store`` has already persisted
-            the decided state, so a concurrent decide always sees it."""
+            the decided state, so a concurrent decide always sees it.
+
+            Retry-on-notify-failure (code-review finding, this card, round
+            1): committing the decided state BEFORE notify is attempted
+            would otherwise mean a notify that *raises* (not just one
+            that's slow — e.g. the backend's Postgres write failing
+            outright) gets permanently treated as delivered, with no retry
+            on the next poll. Each notify call below is caught
+            individually and, if it raised, its flow key (or the summary
+            stamp) is rolled back in a SECOND, short lock acquisition —
+            no slow I/O inside it — so the next ``ping=true`` call decides
+            that flow as "new" again instead of silently dropping it. The
+            rollback itself can't reopen the SET/CLEAR race: any other
+            caller that decided concurrently already saw this flow as
+            tracked from this call's first save, so no one double-fires
+            for it before the rollback runs."""
             state_path = github_maintenance.default_ping_state_path()
             try:
                 with github_maintenance.locked_store(state_path):
@@ -387,41 +402,64 @@ class GitAppPlugin:
                 except AttributeError:
                     notify = None  # a ctx without the facade (tests) — no notifications
 
+                failed_keys = []
+                summary_failed = False
                 if notify is not None:
                     for flow in plan["new_failures"]:
-                        # external_id folds in the SET's own timestamp —
-                        # code-review finding (PR #7 round 1/2 HIGH): the
-                        # real NotificationDB.has_notification dedups on
-                        # the bare (source, external_id, external_status)
-                        # triple FOREVER (its only purge is a one-time
-                        # 7-day cleanup at process boot), so a constant
-                        # id per flow key would silently swallow every
-                        # notify after the first real occurrence —
-                        # defeating the whole SET/CLEAR/re-notify design
-                        # this route exists to ship.
-                        notify(
-                            message=f"{flow.get('workflow')} failing on {flow.get('repo')} "
-                                    f"({flow.get('consecutive_failures', 0)} consecutive run(s))",
-                            level="error",
-                            title="GitHub workflow failing",
-                            url=flow.get("latest_run_url") or "",
-                            external_id=f"ci:{github_maintenance.flow_key(flow)}:{int(now_ts)}",
-                            external_status="failing",
-                        )
+                        flow_key = github_maintenance.flow_key(flow)
+                        try:
+                            # external_id folds in the SET's own timestamp —
+                            # code-review finding (PR #7 round 1/2 HIGH): the
+                            # real NotificationDB.has_notification dedups on
+                            # the bare (source, external_id, external_status)
+                            # triple FOREVER (its only purge is a one-time
+                            # 7-day cleanup at process boot), so a constant
+                            # id per flow key would silently swallow every
+                            # notify after the first real occurrence —
+                            # defeating the whole SET/CLEAR/re-notify design
+                            # this route exists to ship.
+                            notify(
+                                message=f"{flow.get('workflow')} failing on {flow.get('repo')} "
+                                        f"({flow.get('consecutive_failures', 0)} consecutive run(s))",
+                                level="error",
+                                title="GitHub workflow failing",
+                                url=flow.get("latest_run_url") or "",
+                                external_id=f"ci:{flow_key}:{int(now_ts)}",
+                                external_status="failing",
+                            )
+                        except Exception:
+                            log.exception("github maintenance ping: instant notify failed for %s", flow_key)
+                            failed_keys.append(flow_key)
                     if plan["summary_due"]:
                         names = ", ".join(github_maintenance.flow_key(f) for f in failing_flows[:10])
-                        notify(
-                            message=f"{len(failing_flows)} failing workflow(s): {names}",
-                            level="warning",
-                            title="GitHub Maintenance — daily summary",
-                            external_status="summary",
-                        )
+                        try:
+                            notify(
+                                message=f"{len(failing_flows)} failing workflow(s): {names}",
+                                level="warning",
+                                title="GitHub Maintenance — daily summary",
+                                external_status="summary",
+                            )
+                        except Exception:
+                            log.exception("github maintenance ping: daily summary notify failed")
+                            summary_failed = True
+
+                if failed_keys or summary_failed:
+                    with github_maintenance.locked_store(state_path):
+                        current = github_maintenance.load_surfaced_store(state_path)
+                        failing = dict(current.get("failing") or {})
+                        for flow_key in failed_keys:
+                            failing.pop(flow_key, None)
+                        current["failing"] = failing
+                        if summary_failed:
+                            current["last_summary_at"] = state.get("last_summary_at")
+                        github_maintenance.save_surfaced_store(state_path, current)
             except Exception:
                 log.exception("github maintenance ping (notify/persist) failed")
                 return None
             return {
-                "instant_sent": [github_maintenance.flow_key(f) for f in plan["new_failures"]],
-                "daily_summary_sent": bool(plan["summary_due"]),
+                "instant_sent": [github_maintenance.flow_key(f) for f in plan["new_failures"]
+                                  if github_maintenance.flow_key(f) not in failed_keys],
+                "daily_summary_sent": bool(plan["summary_due"]) and not summary_failed,
             }
 
         @api.get("/github/maintenance")
