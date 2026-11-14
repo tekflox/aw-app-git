@@ -56,14 +56,16 @@ def setup(tmp_path, monkeypatch):
     return TestClient(api), app, ctx, notify_calls
 
 
-def _warm(app, *, prs=None, failing_flows=None, scanned_repos=5, truncated=False, error=None):
+def _warm(app, *, prs=None, failing_flows=None, scanned_repos=5, truncated=False, error=None,
+         mode="all", watched_repos=5):
     """Directly set the lazily-created MaintenanceWatchdog's cache — the
     cache shape slice 1 (PR#6) already produces, so this route never needs
     to run a real scan to be tested."""
     cache = app._maintenance.get_cached()
     cache.update({
         "prs": prs or [], "failing_flows": failing_flows or [],
-        "counts": {"scanned_repos": scanned_repos, "truncated": truncated},
+        "counts": {"scanned_repos": scanned_repos, "truncated": truncated,
+                  "mode": mode, "watched_repos": watched_repos},
         "errors": [], "last_poll": 123.0, "error": error,
     })
     app._maintenance._cache = cache
@@ -80,7 +82,8 @@ def test_has_work_true_when_a_pr_needs_attention(setup):
     assert body["has_work"] is True
     assert body["prs"] == [_pr()]
     assert body["failing_flows"] == []
-    assert body["counts"] == {"prs": 1, "failing_flows": 0, "scanned_repos": 5, "truncated": False}
+    assert body["counts"] == {"prs": 1, "failing_flows": 0, "scanned_repos": 5, "truncated": False,
+                              "mode": "all", "watched_repos": 5}
 
 
 def test_has_work_true_when_a_flow_is_failing(setup):
@@ -98,7 +101,8 @@ def test_has_work_false_on_a_warm_but_clean_cache(setup):
     body = tc.get("/github/maintenance").json()
     assert body["has_work"] is False
     assert body["prs"] == [] and body["failing_flows"] == []
-    assert body["counts"] == {"prs": 0, "failing_flows": 0, "scanned_repos": 5, "truncated": False}
+    assert body["counts"] == {"prs": 0, "failing_flows": 0, "scanned_repos": 5, "truncated": False,
+                              "mode": "all", "watched_repos": 5}
 
 
 def test_limit_truncates_the_lists_but_not_the_counts(setup):
