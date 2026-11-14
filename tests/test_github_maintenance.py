@@ -229,6 +229,19 @@ def test_resolve_scope_list_mode_a_non_cloned_entry_gets_local_path_none():
     assert resolved["owners"] == ["someone-else", "tekflox"]
 
 
+def test_resolve_scope_list_mode_a_duplicate_entry_is_not_double_scanned():
+    """Code-review finding (PR #9): repos was appended once per raw list
+    string with no dedup against the full_names set it builds alongside —
+    a copy-pasted duplicate entry (save_settings enforces no dedup either)
+    scanned the same repo twice, wasting gh api calls and duplicating its
+    entries in failing_flows, undercutting list mode's own rate-limit
+    goal."""
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"))
+    resolved = gm.resolve_repo_scope(
+        {"mode": "list", "list": ["tekflox/aw-app-kb", "tekflox/aw-app-kb"]}, discovered)
+    assert len(resolved["repos"]) == 1
+
+
 def test_resolve_scope_list_mode_empty_list_is_an_in_band_error_not_a_crash():
     discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"))
     resolved = gm.resolve_repo_scope({"mode": "list", "list": []}, discovered)

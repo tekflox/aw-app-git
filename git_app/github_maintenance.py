@@ -316,6 +316,8 @@ def resolve_repo_scope(scope: "dict | None", discovered: dict) -> dict:
         if not owner or not repo_name:
             continue
         full_name = f"{owner}/{repo_name}"
+        if full_name in full_names:
+            continue  # a duplicate list entry must not double-scan the repo
         full_names.add(full_name)
         owners.add(owner)
         existing = by_full_name.get(full_name)
