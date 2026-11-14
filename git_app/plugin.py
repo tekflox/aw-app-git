@@ -23,6 +23,13 @@ import os
 import subprocess
 import time
 
+# A local name, not ``time.time`` itself — monkeypatching the real stdlib
+# ``time`` module (as a naive ``monkeypatch.setattr(plugin.time, "time",
+# ...)`` would) mutates it process-wide, which also feeds httpx/cookiejar's
+# OWN internal `time.time()` calls inside a TestClient request and starves
+# a test's fake clock sequence. Patching this name only affects this module.
+_now_s = time.time
+
 # Module level, unlike the other fastapi imports (which stay local to
 # _build_routes): this file uses `from __future__ import annotations`, so a
 # handler's annotations are strings FastAPI resolves against the MODULE's
@@ -355,7 +362,7 @@ class GitAppPlugin:
             # surfaced-PR back-off store uses, just pointed at a different
             # file (this route's own ping-gate state, not the scan's).
             state = github_maintenance.load_surfaced_store(state_path)
-            plan = github_maintenance.plan_maintenance_pings(failing_flows, state, time.time())
+            plan = github_maintenance.plan_maintenance_pings(failing_flows, state, _now_s())
 
             try:
                 notify = ctx.notify if ctx.has("notifications:send") else None

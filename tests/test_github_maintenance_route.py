@@ -193,7 +193,7 @@ def test_ping_true_clears_on_green_then_renotifies_on_refailure(setup, monkeypat
     failure of the SAME key."""
     tc, app, _, notify_calls = setup
     times = iter([1000.0, 1060.0, 1120.0])
-    monkeypatch.setattr(plugin.time, "time", lambda: next(times))
+    monkeypatch.setattr(plugin, "_now_s", lambda: next(times))
 
     _warm(app, failing_flows=[_flow()])
     tc.get("/github/maintenance?ping=true")
@@ -215,7 +215,7 @@ def test_ping_true_clears_on_green_then_renotifies_on_refailure(setup, monkeypat
 def test_ping_true_daily_summary_fires_at_most_once_per_24h(setup, monkeypatch):
     tc, app, _, notify_calls = setup
     times = iter([1000.0, 1000.0 + 3600.0, 1000.0 + 25 * 3600.0])
-    monkeypatch.setattr(plugin.time, "time", lambda: next(times))
+    monkeypatch.setattr(plugin, "_now_s", lambda: next(times))
 
     _warm(app, failing_flows=[_flow()])
     body = tc.get("/github/maintenance?ping=true").json()
