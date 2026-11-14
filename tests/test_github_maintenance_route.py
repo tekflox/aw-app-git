@@ -11,6 +11,7 @@ Run: .venv/aw/bin/python -m pytest tests/test_github_maintenance_route.py
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -131,6 +132,66 @@ def test_cold_cache_polls_inline_instead_of_answering_false_silently(setup, monk
     body = tc.get("/github/maintenance").json()
     assert body["has_work"] is True  # NOT the false-on-cold-silently trap
     assert body["failing_flows"] == [_flow()]
+
+
+def test_cold_cache_slower_than_the_budget_answers_warming_up_not_a_hang(setup, monkeypatch):
+    """Card 4185bf3b-9510-8132: a cold scan that outruns the client's own
+    timeout must never be allowed to just hang here until it finishes — the
+    route answers truthfully and fast instead, well inside the AP-MT dag
+    Workflow's observed ~10s connection timeout. (The scan continuing in the
+    background afterward — asyncio.shield's whole point — is verified
+    directly on MaintenanceWatchdog in test_github_maintenance.py: TestClient
+    tears down its own event loop at the end of each call, so a task
+    scheduled during this request isn't observable surviving past it here.)
+    """
+    tc, app, _, _ = setup
+    monkeypatch.setattr(plugin, "MAINTENANCE_COLD_POLL_BUDGET_S", 0.05)
+
+    async def slow_poll(now=None):
+        await asyncio.sleep(0.3)
+        app._maintenance._cache.update({
+            "prs": [], "failing_flows": [_flow()],
+            "counts": {"scanned_repos": 3, "truncated": False},
+            "errors": [], "last_poll": 999.0, "error": None,
+        })
+
+    monkeypatch.setattr(app._maintenance, "poll", slow_poll)
+
+    resp = tc.get("/github/maintenance")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["warming_up"] is True
+    assert body["has_work"] is False
+
+
+def test_cold_cache_two_concurrent_requests_share_one_scan(setup, monkeypatch):
+    """Card 4185bf3b-9510-8132: before poll_task()'s single-flight guard,
+    two requests landing on the same cold worker each kicked off their own
+    redundant scan. Drive both through the real single-flight entry point
+    directly (TestClient itself is single-threaded, so this exercises
+    MaintenanceWatchdog.poll_task() the way two concurrent event-loop
+    callers would, without needing real request concurrency)."""
+    tc, app, _, _ = setup
+    scans = []
+
+    async def counting_poll(now=None):
+        scans.append(1)
+        app._maintenance._cache.update({
+            "prs": [], "failing_flows": [], "counts": {}, "errors": [],
+            "last_poll": 999.0, "error": None,
+        })
+
+    monkeypatch.setattr(app._maintenance, "poll", counting_poll)
+
+    async def two_concurrent_callers():
+        task_a = app._maintenance.poll_task()
+        task_b = app._maintenance.poll_task()
+        assert task_a is task_b
+        await task_a
+        await task_b
+
+    asyncio.run(two_concurrent_callers())
+    assert scans == [1]
 
 
 def test_warm_cache_does_not_poll_again(setup, monkeypatch):
