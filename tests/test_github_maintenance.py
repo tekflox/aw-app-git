@@ -112,18 +112,41 @@ def test_discover_github_repos_includes_root_checkout_first():
         assert result.get("error") is None
 
 
-def test_discover_github_repos_carries_a_missing_repos_dir_as_an_error_not_a_clean_empty(tmp_path):
-    """Same precedent pr_scan.py's own
-    test_scan_cloned_repos_carries_a_missing_repos_dir_as_an_error_not_a_clean_empty
-    enforces: a repos/ dir this module can't even list must not read as
-    'this workspace genuinely has zero cloned repos'."""
+def test_discover_github_repos_treats_a_merely_missing_repos_dir_as_legitimately_empty(tmp_path):
+    """discover_repos() itself guards with os.path.isdir() first — a
+    workspace with no repos/ cloned yet (fresh install, root-only checkout)
+    is a real, valid state, not a scan failure."""
     base_dir = tmp_path / "workspace-root"
-    _init_bare_git_dir(base_dir)  # root itself IS a git repo
+    _init_bare_git_dir(base_dir)  # root is a repo, repos/ never created
 
     result = gm.discover_github_repos(
         base_dir=str(base_dir), git_remote_url=lambda p: "git@github.com:fredericowu/aw-workspace.git")
+    assert result.get("error") is None
+    assert any(r["owner"] == "fredericowu" for r in result["repos"])
+
+
+def test_discover_github_repos_carries_an_unreadable_repos_dir_as_an_error_not_a_crash(tmp_path):
+    """Code-review finding: discover_repos() does its own UNGUARDED
+    os.listdir() once its isdir() check passes, so a repos/ dir that EXISTS
+    but can't be listed (permission denied) used to raise PermissionError
+    straight out of this function instead of landing in ``error`` — and
+    scan_maintenance awaits this via asyncio.to_thread with nothing around
+    it, so the whole scan (both sweeps) died, not just repo enumeration."""
+    base_dir = tmp_path / "workspace-root"
+    _init_bare_git_dir(base_dir)
+    repos_dir = base_dir / "repos"
+    repos_dir.mkdir()
+    (repos_dir / "alpha" / ".git").mkdir(parents=True)
+    repos_dir.chmod(0o000)
+    try:
+        result = gm.discover_github_repos(
+            base_dir=str(base_dir),
+            git_remote_url=lambda p: "git@github.com:fredericowu/aw-workspace.git")
+    finally:
+        repos_dir.chmod(0o755)  # restore before tmp_path teardown tries to clean up
+
     assert result["error"] is not None
-    assert str(base_dir / "repos") in result["error"]
+    assert str(repos_dir) in result["error"]
     # the root repo is still reported — an error on repos/ must not drop it
     assert any(r["owner"] == "fredericowu" for r in result["repos"])
 
@@ -244,7 +267,8 @@ def _fake_runner(search_responses=None, view_responses=None, search_errors=None,
             url = args[2]
             return 0, json.dumps(view_responses.get(url, {})), ""
         if args[0] == "api":
-            return 0, json.dumps(api_responses.get(args[1], {"workflow_runs": []})), ""
+            default = {"workflows": []} if "/actions/workflows?" in args[1] else {"workflow_runs": []}
+            return 0, json.dumps(api_responses.get(args[1], default)), ""
         raise AssertionError(f"unexpected gh invocation: {args}")
 
     return runner
@@ -415,8 +439,10 @@ def test_multiple_workflows_grouped_independently():
 def test_scan_repo_failing_workflows_reports_a_failing_entry(monkeypatch):
     monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
     runner = _fake_runner(api_responses={
-        "repos/tekflox/aw-app-kb/actions/runs?branch=main&per_page=10": {
-            "workflow_runs": [_run(2, conclusion="failure")]},
+        "repos/tekflox/aw-app-kb/actions/workflows?per_page=100": {
+            "total_count": 1, "workflows": [{"id": 9, "name": "CI", "state": "active"}]},
+        "repos/tekflox/aw-app-kb/actions/workflows/9/runs?branch=main&per_page=10": {
+            "workflow_runs": [_run(2, workflow_id=9, conclusion="failure")]},
     })
     result = asyncio.run(gm.scan_repo_failing_workflows(
         {"owner": "tekflox", "repo": "aw-app-kb", "local_path": "/x"}, runner))
@@ -426,6 +452,67 @@ def test_scan_repo_failing_workflows_reports_a_failing_entry(monkeypatch):
         "latest_run_url": "https://github.com/o/r/actions/runs/2",
         "conclusion": "failure", "consecutive_failures": 1,
     }]
+
+
+def test_scan_repo_failing_workflows_a_low_traffic_workflow_still_surfaces(monkeypatch):
+    """The exact code-review finding: a busy workflow and a rarely-triggered
+    one no longer share one combined 10-run page — each workflow gets its
+    own dedicated runs query, so the rarely-triggered one's failure can't be
+    pushed out of the window by the busy one."""
+    monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
+    busy_runs = {"workflow_runs": [_run(n, workflow_id=1, name="CI", conclusion="success")
+                                   for n in range(50, 40, -1)]}  # 10 green runs
+    runner = _fake_runner(api_responses={
+        "repos/tekflox/aw-app-kb/actions/workflows?per_page=100": {
+            "total_count": 2, "workflows": [
+                {"id": 1, "name": "CI", "state": "active"},
+                {"id": 2, "name": "Weekly Release", "state": "active"},
+            ]},
+        "repos/tekflox/aw-app-kb/actions/workflows/1/runs?branch=main&per_page=10": busy_runs,
+        "repos/tekflox/aw-app-kb/actions/workflows/2/runs?branch=main&per_page=10": {
+            "workflow_runs": [_run(3, workflow_id=2, name="Weekly Release", conclusion="failure")]},
+    })
+    result = asyncio.run(gm.scan_repo_failing_workflows(
+        {"owner": "tekflox", "repo": "aw-app-kb", "local_path": "/x"}, runner))
+    assert result["error"] is None
+    workflows_flagged = {e["workflow"] for e in result["entries"]}
+    assert workflows_flagged == {"Weekly Release"}
+
+
+def test_scan_repo_failing_workflows_skips_disabled_workflows(monkeypatch):
+    monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
+    runner = _fake_runner(api_responses={
+        "repos/tekflox/aw-app-kb/actions/workflows?per_page=100": {
+            "total_count": 1, "workflows": [{"id": 5, "name": "Old CI", "state": "disabled_manually"}]},
+    })
+    result = asyncio.run(gm.scan_repo_failing_workflows(
+        {"owner": "tekflox", "repo": "aw-app-kb", "local_path": "/x"}, runner))
+    assert result["entries"] == []
+    assert result["error"] is None
+
+
+def test_scan_repo_failing_workflows_isolates_a_per_workflow_fetch_error(monkeypatch):
+    """One workflow's runs call failing must not drop the OTHER workflow's
+    entry — same per-item error isolation the PR sweep already has."""
+    monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
+
+    async def runner(args):
+        if args[:2] == ["api", "repos/tekflox/aw-app-kb/actions/workflows?per_page=100"]:
+            return 0, json.dumps({"total_count": 2, "workflows": [
+                {"id": 1, "name": "CI", "state": "active"},
+                {"id": 2, "name": "Deploy", "state": "active"},
+            ]}), ""
+        if args[1] == "repos/tekflox/aw-app-kb/actions/workflows/1/runs?branch=main&per_page=10":
+            return 1, "", "gh: rate limited"
+        if args[1] == "repos/tekflox/aw-app-kb/actions/workflows/2/runs?branch=main&per_page=10":
+            return 0, json.dumps({"workflow_runs": [_run(1, workflow_id=2, name="Deploy",
+                                                          conclusion="failure")]}), ""
+        raise AssertionError(args)
+
+    result = asyncio.run(gm.scan_repo_failing_workflows(
+        {"owner": "tekflox", "repo": "aw-app-kb", "local_path": "/x"}, runner))
+    assert "rate limited" in result["error"]
+    assert [e["workflow"] for e in result["entries"]] == ["Deploy"]
 
 
 def test_scan_repo_failing_workflows_unresolved_default_branch_is_an_error(monkeypatch):
@@ -468,10 +555,14 @@ def test_scan_maintenance_reports_both_prs_and_failing_flows(tmp_path, monkeypat
         search_responses={"tekflox": [pr], "fredericowu": []},
         view_responses={pr["url"]: view},
         api_responses={
-            "repos/tekflox/aw-app-kb/actions/runs?branch=main&per_page=10": {
+            "repos/tekflox/aw-app-kb/actions/workflows?per_page=100": {
+                "total_count": 1, "workflows": [{"id": 1, "name": "CI", "state": "active"}]},
+            "repos/tekflox/aw-app-kb/actions/workflows/1/runs?branch=main&per_page=10": {
                 "workflow_runs": [_run(1, conclusion="failure")]},
-            "repos/fredericowu/aw-workspace/actions/runs?branch=main&per_page=10": {
-                "workflow_runs": [_run(1, conclusion="success")]},
+            "repos/fredericowu/aw-workspace/actions/workflows?per_page=100": {
+                "total_count": 1, "workflows": [{"id": 2, "name": "CI", "state": "active"}]},
+            "repos/fredericowu/aw-workspace/actions/workflows/2/runs?branch=main&per_page=10": {
+                "workflow_runs": [_run(1, workflow_id=2, conclusion="success")]},
         })
     store_path = str(tmp_path / "surfaced.json")
     result = asyncio.run(gm.scan_maintenance(
@@ -487,17 +578,24 @@ def test_scan_maintenance_reports_both_prs_and_failing_flows(tmp_path, monkeypat
     assert gm.load_surfaced_store(store_path)  # the surfaced stamp was persisted
 
 
-def test_scan_maintenance_surfaces_missing_repos_dir_as_an_error_not_a_clean_empty(tmp_path, monkeypatch):
+def test_scan_maintenance_surfaces_an_unreadable_repos_dir_as_an_error_not_a_clean_empty(tmp_path, monkeypatch):
     base = tmp_path / "ws"
-    _init_bare_git_dir(base)  # root exists (still scanned), but repos/ never created
+    _init_bare_git_dir(base)  # root exists, still scanned, despite repos/ being unreadable below
+    repos_dir = base / "repos"
+    repos_dir.mkdir()
+    (repos_dir / "alpha" / ".git").mkdir(parents=True)
+    repos_dir.chmod(0o000)
     monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
 
-    result = asyncio.run(gm.scan_maintenance(
-        now=NOW, gh_runner=_fake_runner(), base_dir=str(base),
-        git_remote_url=lambda p: "git@github.com:fredericowu/aw-workspace.git",
-        store_path=str(tmp_path / "surfaced.json")))
+    try:
+        result = asyncio.run(gm.scan_maintenance(
+            now=NOW, gh_runner=_fake_runner(), base_dir=str(base),
+            git_remote_url=lambda p: "git@github.com:fredericowu/aw-workspace.git",
+            store_path=str(tmp_path / "surfaced.json")))
+    finally:
+        repos_dir.chmod(0o755)
+
     assert any(e["error"] and "unreadable" in e["error"] for e in result["errors"])
-    # the root repo itself is still scanned despite repos/ being unreadable
     assert result["counts"]["mapped_repos"] == 1
 
 
@@ -531,8 +629,8 @@ def test_watchdog_poll_populates_the_cache_from_a_successful_scan(tmp_path, monk
            "reviewDecision": "", "mergeable": "MERGEABLE", "isDraft": False, "updatedAt": pr["updatedAt"]}
     runner = _fake_runner(
         search_responses={"tekflox": [pr]}, view_responses={pr["url"]: view},
-        api_responses={"repos/tekflox/aw-app-kb/actions/runs?branch=main&per_page=10":
-                       {"workflow_runs": []}})
+        api_responses={"repos/tekflox/aw-app-kb/actions/workflows?per_page=100":
+                       {"total_count": 0, "workflows": []}})
 
     wd = gm.MaintenanceWatchdog(
         base_dir=str(base), store_path=str(tmp_path / "surfaced.json"), gh_runner=runner,
@@ -545,13 +643,33 @@ def test_watchdog_poll_populates_the_cache_from_a_successful_scan(tmp_path, monk
     assert len(cached["prs"]) == 1
 
 
-def test_watchdog_poll_never_raises_and_records_a_missing_root_as_an_error(tmp_path):
+def test_watchdog_poll_never_raises_on_a_missing_root_and_reports_a_clean_empty(tmp_path):
     """A base_dir that doesn't exist at all (e.g. a misconfigured
-    AW_APP_GIT_WATCHDOG_ROOT) must surface as cached['error'], not an
-    uncaught exception out of the watchdog task — the registered callable
-    runs under the framework's own cadence loop, which must never die."""
+    AW_APP_GIT_WATCHDOG_ROOT) is a legitimately empty scan, not a failure —
+    the registered callable must not die either way, under the framework's
+    own cadence loop."""
     wd = gm.MaintenanceWatchdog(base_dir=str(tmp_path / "does-not-exist-root"))
     asyncio.run(wd.poll(now=NOW))  # must not raise
     cached = wd.get_cached()
     assert cached["last_poll"] == NOW
+    assert cached["error"] is None
+    assert cached["prs"] == [] and cached["failing_flows"] == []
+
+
+def test_watchdog_poll_never_raises_on_an_unreadable_repos_dir_and_records_the_error(tmp_path):
+    base = tmp_path / "ws"
+    _init_bare_git_dir(base)
+    repos_dir = base / "repos"
+    repos_dir.mkdir()
+    repos_dir.chmod(0o000)
+    try:
+        wd = gm.MaintenanceWatchdog(
+            base_dir=str(base), git_remote_url=lambda p: "git@github.com:fredericowu/aw-workspace.git")
+        asyncio.run(wd.poll(now=NOW))  # must not raise — this is the exact bug the review found
+    finally:
+        repos_dir.chmod(0o755)
+
+    cached = wd.get_cached()
+    assert cached["last_poll"] == NOW
     assert cached["error"] is not None
+    assert "unreadable" in cached["error"]

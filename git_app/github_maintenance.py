@@ -202,21 +202,30 @@ def discover_github_repos(*, base_dir: "str | None" = None,
     carry their local checkout path as ``local_path`` (needed to resolve the
     default branch for the failing-workflow sweep).
 
-    A ``repos/`` dir that can't be listed (missing or unreadable) is carried
-    forward as ``error`` rather than collapsing into a clean-looking empty
-    scan — the same precedent pr_scan.py's
+    A ``repos/`` dir that EXISTS but can't be listed (permission denied) is
+    carried forward as ``error`` rather than collapsing into a clean-looking
+    empty scan — the same precedent pr_scan.py's
     ``test_scan_cloned_repos_carries_a_missing_repos_dir_as_an_error_not_a_clean_empty``
-    enforces for its own repo-enumeration step.
+    enforces for its own repo-enumeration step. A ``repos/`` dir that simply
+    doesn't exist at all is NOT an error here — ``discover_repos`` itself
+    treats that as "legitimately zero repos cloned yet" (it guards with
+    ``os.path.isdir`` first), and this function defers to that. Code-review
+    finding: ``discover_repos`` does its own unguarded ``os.listdir`` once
+    that ``isdir`` check passes, so the permission-denied case must be
+    caught around THIS call, not via a separate pre-check that only
+    duplicates (and never prevents) the real raise site.
     """
     base_dir = base_dir or uncommitted_watchdog.workspace_root()
     repos_dir = os.path.join(base_dir, "repos")
     error = None
     try:
-        os.listdir(repos_dir)
+        entries = uncommitted_watchdog.discover_repos(base_dir)
     except OSError as exc:
         error = f"{repos_dir} unreadable: {exc}"
+        entries = []
+        if os.path.isdir(os.path.join(base_dir, ".git")):
+            entries.append((os.path.basename(os.path.normpath(base_dir)), base_dir))
 
-    entries = uncommitted_watchdog.discover_repos(base_dir)
     remotes: dict = {}
     paths: dict = {}
     for name, path in entries:
@@ -494,12 +503,56 @@ def analyze_workflow_runs(runs: list) -> dict:
     return results
 
 
+async def list_workflows(owner: str, repo: str, gh_runner: GhRunner) -> "tuple[list | None, str | None, bool]":
+    """``(workflows, error, truncated)``. ``truncated`` is honest about
+    GitHub's own ``total_count`` vs. what one ``per_page=100`` page actually
+    returned — true only for a repo with over 100 workflow files, which
+    this sweep doesn't attempt to paginate past."""
+    code, out, err = await gh_runner(["api", f"repos/{owner}/{repo}/actions/workflows?per_page=100"])
+    if code != 0:
+        return None, (err or out or f"gh api exited {code}").strip(), False
+    try:
+        data = json.loads(out or "{}")
+    except ValueError as exc:
+        return None, f"malformed gh api output: {exc}", False
+    workflows = data.get("workflows") if isinstance(data, dict) else None
+    workflows = workflows or []
+    truncated = isinstance(data, dict) and (data.get("total_count") or 0) > len(workflows)
+    return workflows, None, truncated
+
+
+async def fetch_workflow_runs(owner: str, repo: str, workflow_id: Any, branch: str,
+                              gh_runner: GhRunner, *, per_page: int = RUNS_PER_PAGE) -> "tuple[list | None, str | None]":
+    code, out, err = await gh_runner(
+        ["api", f"repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs"
+                f"?branch={branch}&per_page={per_page}"])
+    if code != 0:
+        return None, (err or out or f"gh api exited {code}").strip()
+    try:
+        data = json.loads(out or "{}")
+    except ValueError as exc:
+        return None, f"malformed gh api output: {exc}"
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    return (runs or []), None
+
+
 async def scan_repo_failing_workflows(repo: dict, gh_runner: GhRunner) -> dict:
     """One repo's slice of the failing-workflow sweep. ``repo`` is one of
     :func:`discover_github_repos`'s mapped entries (``owner``/``repo``/
     ``local_path``). Default branch is discovered from the LOCAL checkout
     (``github_prs.discover_default_branch``, a ``git`` call, not ``gh``) —
-    unresolved is reported as an error, never silently skipped."""
+    unresolved is reported as an error, never silently skipped.
+
+    One ``gh api`` call per ACTIVE workflow (not one combined call for the
+    whole repo) — code-review finding: a single ``.../actions/runs``
+    call shares its ``per_page`` window across every workflow triggered on
+    the branch, so a low-traffic workflow (e.g. a weekly release workflow —
+    exactly the kind this sweep exists to catch) can be pushed out of that
+    window entirely by a busy one and go missing with no error at all. Each
+    workflow now gets its own dedicated, un-contended window; a per-workflow
+    fetch failure is isolated into ``error`` without dropping the OTHER
+    workflows' entries, same isolation the PR sweep already has per owner.
+    """
     owner, repo_name, local_path = repo["owner"], repo["repo"], repo.get("local_path")
     full_name = f"{owner}/{repo_name}"
     default_ref = await asyncio.to_thread(github_prs.discover_default_branch, local_path or "")
@@ -507,24 +560,30 @@ async def scan_repo_failing_workflows(repo: dict, gh_runner: GhRunner) -> dict:
         return {"repo": full_name, "error": "could not resolve a default branch", "entries": []}
     branch = default_ref.split("/", 1)[1] if "/" in default_ref else default_ref
 
-    code, out, err = await gh_runner(
-        ["api", f"repos/{owner}/{repo_name}/actions/runs?branch={branch}&per_page={RUNS_PER_PAGE}"])
-    if code != 0:
-        return {"repo": full_name, "error": (err or out or f"gh api exited {code}").strip(), "entries": []}
-    try:
-        data = json.loads(out or "{}")
-    except ValueError as exc:
-        return {"repo": full_name, "error": f"malformed gh api output: {exc}", "entries": []}
+    workflows, error, truncated = await list_workflows(owner, repo_name, gh_runner)
+    if error is not None:
+        return {"repo": full_name, "error": f"gh api workflows failed: {error}", "entries": []}
 
-    runs = data.get("workflow_runs") if isinstance(data, dict) else None
-    analyzed = analyze_workflow_runs(runs or [])
-    entries = [
-        {"repo": full_name, "workflow": v["workflow"], "default_branch": branch,
-         "latest_run_url": v["latest_run_url"], "conclusion": v["conclusion"],
-         "consecutive_failures": v["consecutive_failures"]}
-        for v in analyzed.values() if v["is_failing"]
-    ]
-    return {"repo": full_name, "error": None, "entries": entries}
+    entries: list = []
+    per_workflow_errors: list = []
+    for wf in workflows:
+        if (wf.get("state") or "").lower() != "active":
+            continue
+        runs, run_error = await fetch_workflow_runs(owner, repo_name, wf["id"], branch, gh_runner)
+        if run_error is not None:
+            per_workflow_errors.append(f"workflow {wf.get('name') or wf['id']}: {run_error}")
+            continue
+        analyzed = analyze_workflow_runs(runs)
+        for v in analyzed.values():
+            if v["is_failing"]:
+                entries.append({"repo": full_name, "workflow": v["workflow"], "default_branch": branch,
+                                "latest_run_url": v["latest_run_url"], "conclusion": v["conclusion"],
+                                "consecutive_failures": v["consecutive_failures"]})
+
+    if truncated:
+        per_workflow_errors.append(f"over 100 workflows on {full_name} — only the first 100 were scanned")
+
+    return {"repo": full_name, "error": "; ".join(per_workflow_errors) or None, "entries": entries}
 
 
 # ── the full sweep ────────────────────────────────────────────────────────
