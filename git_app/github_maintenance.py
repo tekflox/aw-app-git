@@ -854,10 +854,12 @@ async def scan_maintenance(*, now: float, gh_runner: GhRunner = default_gh_runne
 class MaintenanceWatchdog:
     """Cached ``ctx.watchdog``-driven poller, PrWatchdog-style, but NOT a
     wrapper around :class:`github_prs.PrWatchdog` — its author-scoped
-    discovery is wrong for this sweep (see the module docstring). The next
-    slice's gate route reads :meth:`get_cached` and only triggers an inline
-    :meth:`poll` when the cache is cold (``last_poll == 0``); a ~90-repo
-    sweep cannot answer inside a synchronous HTTP request."""
+    discovery is wrong for this sweep (see the module docstring). The gate
+    route (``GET /github/maintenance``, card 4185bf3b-9510-81c5) reads
+    :meth:`get_cached` and only triggers a poll when the cache is cold
+    (``last_poll == 0``); a ~90-repo sweep cannot answer inside a
+    synchronous HTTP request, so it goes through :meth:`poll_task` instead
+    of calling :meth:`poll` directly — see that method's docstring."""
 
     def __init__(self, *, base_dir: "str | None" = None, store_path: "str | None" = None,
                  gh_runner: GhRunner = default_gh_runner,
@@ -875,9 +877,28 @@ class MaintenanceWatchdog:
             "prs": [], "failing_flows": [], "counts": {}, "errors": [],
             "last_poll": 0, "error": None,
         }
+        self._inflight: "asyncio.Task | None" = None
 
     def get_cached(self) -> dict:
         return dict(self._cache)
+
+    def poll_task(self) -> "asyncio.Task":
+        """Single-flight entry point for a cold-cache caller (card
+        4185bf3b-9510-8132): returns the one scan already in flight on this
+        worker, starting a new one only if none is running. Without this,
+        every concurrent request hitting a cold cache on the SAME worker
+        process started its OWN full ~38s scan — N callers meant N redundant
+        sweeps racing each other over the same ``gh`` calls instead of
+        sharing one.
+
+        Deliberately a bare :class:`asyncio.Task`, not awaited here: the
+        gate route wraps it in ``asyncio.wait_for(asyncio.shield(...))`` so
+        a caller that gives up waiting does not cancel the scan out from
+        under whoever else (including a later request on this same worker)
+        is still waiting on it."""
+        if self._inflight is None or self._inflight.done():
+            self._inflight = asyncio.ensure_future(self.poll())
+        return self._inflight
 
     async def poll(self, now: "float | None" = None) -> None:
         now = now if now is not None else time.time()

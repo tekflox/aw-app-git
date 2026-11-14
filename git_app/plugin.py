@@ -53,6 +53,12 @@ DEFAULT_OAUTH_CLIENT_ID = "Ov23liWR67ZgY2P6fYKh"
 # maintenance_repo_list validation, and the settings-page form).
 _REPO_ENTRY_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
+# Cold-cache fallback budget for GET /github/maintenance (card
+# 4185bf3b-9510-8132): comfortably under the ~10.0-10.1s connection timeout
+# measured on the AP-MT dag Workflow's http gate node, so the route always
+# answers before that caller gives up — see get_maintenance's docstring.
+MAINTENANCE_COLD_POLL_BUDGET_S = 8.0
+
 
 def _watchdog_enabled(ctx) -> bool:
     raw = ctx.secrets.read("watchdog_enabled")
@@ -305,8 +311,22 @@ class GitAppPlugin:
         if ctx.has("watchdog:tasks"):
             # The GitHub Maintenance Plan's scan layer (card 4185bf3b-9510-8121)
             # — owner-scoped PR attention + default-branch failing-workflow
-            # sweep, cached the same way as the "github" watchdog above. No
-            # route reads this cache yet; that's the next slice.
+            # sweep, cached the same way as the "github" watchdog above, and
+            # read synchronously by GET /github/maintenance (card
+            # 4185bf3b-9510-81c5).
+            #
+            # run_immediately is left False deliberately (card
+            # 4185bf3b-9510-8132, PR #10): at AW_WORKSPACE_WORKERS=10 this
+            # process's WatchdogSupervisor only RUNS a registered task's loop
+            # on the single worker holding the FlockLease lease (src/apps/
+            # watchdog.py's `if self._leader:` gate, backed by src/api/
+            # app.py's WATCHDOG_LEADER_LOCK) — the other 9 workers register
+            # the task but it never ticks at all, so flipping this flag would
+            # only ever pre-warm one worker in ten. The real fix for the
+            # ping=true hang lives in the route handler below instead:
+            # bounding the cold-cache fallback's wait and single-flighting
+            # concurrent cold hits, which is correct regardless of which (or
+            # how many) workers ever get a running background poll.
             ctx.watchdog.register(
                 "github_maintenance", self._maintenance_watchdog(ctx).poll,
                 lambda: github_maintenance.DEFAULT_POLL_INTERVAL_S,
@@ -538,14 +558,42 @@ class GitAppPlugin:
             (``last_poll == 0``) — poll inline once rather than ever
             answering ``has_work=false`` before a single real scan ran.
 
+            Bounded + single-flighted (card 4185bf3b-9510-8132): a cold scan
+            over this workspace's repo universe measured ~38s, well past
+            the AP-MT dag Workflow's ~10s client timeout — that mismatch is
+            exactly what produced two back-to-back connection-level timeouts
+            (``status_code: null``) right after a deploy. Rather than
+            depending on every one of AW_WORKSPACE_WORKERS's worker
+            processes having a pre-warmed cache (which the background
+            watchdog alone cannot guarantee — see its registration comment
+            in ``activate()``), this waits at most
+            ``MAINTENANCE_COLD_POLL_BUDGET_S`` for the scan and answers
+            truthfully with ``warming_up`` instead of hanging into the
+            caller's own timeout. ``poll_task()`` is single-flight AND
+            shielded from this wait's cancellation, so the scan keeps
+            running in the background for the next caller (same tick's
+            retry, or just the next real request) to find warm.
+
             ``ping`` defaults to False, same invariant as cards-need-
             attention's own ``reping``: a plain GET stays a pure read. Only
             ``ping=true`` (the Workflow's gate node) fires the instant/daily
-            notifications, synchronously, inside this handler.
+            notifications, synchronously, inside this handler — never on a
+            ``warming_up`` response, same as the existing broken-scan path.
             """
             cached = maintenance.get_cached()
             if not cached["last_poll"]:
-                await maintenance.poll()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(maintenance.poll_task()),
+                        timeout=MAINTENANCE_COLD_POLL_BUDGET_S,
+                    )
+                except asyncio.TimeoutError:
+                    return JSONResponse(
+                        {"has_work": False, "warming_up": True,
+                         "error": "maintenance scan still running on this worker "
+                                  "— retry shortly"},
+                        status_code=503,
+                    )
                 cached = maintenance.get_cached()
 
             if cached.get("error"):

@@ -963,6 +963,46 @@ def test_watchdog_poll_reads_the_scope_fn_each_poll(tmp_path, monkeypatch):
     assert cached["prs"] == []  # tekflox/aw-app-kb is no longer watched
 
 
+def test_poll_task_is_single_flight_for_concurrent_cold_callers(tmp_path):
+    """Card 4185bf3b-9510-8132: before this, every concurrent request
+    hitting a cold cache on the same worker started its OWN full scan —
+    poll_task() must hand them all the SAME in-flight Task instead."""
+    wd = gm.MaintenanceWatchdog(base_dir=str(tmp_path / "does-not-exist-root"))
+    calls = {"n": 0}
+    real_poll = wd.poll
+
+    async def counting_poll(now=None):
+        calls["n"] += 1
+        await real_poll(now=now)
+
+    wd.poll = counting_poll
+
+    async def main():
+        task_a = wd.poll_task()
+        task_b = wd.poll_task()  # a second caller landing before task_a finishes
+        assert task_a is task_b
+        await task_a
+
+    asyncio.run(main())
+    assert calls["n"] == 1
+
+
+def test_poll_task_starts_a_new_scan_once_the_prior_one_is_done(tmp_path):
+    """Not single-flight forever — once the in-flight task finishes, the
+    NEXT call starts a fresh one (the recurring-poll case, not the
+    concurrent-cold-callers case the test above covers)."""
+    wd = gm.MaintenanceWatchdog(base_dir=str(tmp_path / "does-not-exist-root"))
+
+    async def main():
+        first = wd.poll_task()
+        await first
+        second = wd.poll_task()
+        assert second is not first
+        await second
+
+    asyncio.run(main())
+
+
 # ── ping-gate planning (pure — route-level slice) ───────────────────────
 
 def _flow(repo="o/r", workflow="ci", **over):
