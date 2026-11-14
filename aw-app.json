@@ -97,6 +97,16 @@
         "type": "number",
         "default": 300,
         "description": "PR dashboard: how often (seconds) to re-poll GitHub for PRs and repo status. Minimum 60s."
+      },
+      "maintenance_repo_mode": {
+        "type": "string",
+        "enum": ["all", "cloned", "list"],
+        "default": "all",
+        "description": "GitHub Maintenance scan: which repos the PR-attention and failing-workflow sweeps cover. \"all\" and \"cloned\" currently have identical coverage (the scan already clamps to repos cloned into this workspace); \"list\" restricts the scan to the repos below."
+      },
+      "maintenance_repo_list": {
+        "type": "string",
+        "description": "GitHub Maintenance scan: comma-separated owner/repo entries to watch when scope is \"list\". Ignored for \"all\"/\"cloned\"."
       }
     },
     "required": []

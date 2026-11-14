@@ -162,6 +162,95 @@ def test_filter_keeps_only_cloned_repos():
     assert [p["number"] for p in kept] == [1]
 
 
+# ── resolve_repo_scope — settings-page watchlist, card 4185bf3b-9510-8147 ─
+
+def _discovered(*entries):
+    """``entries`` are ``(owner, repo, local_path)`` tuples."""
+    repos = [{"owner": o, "repo": r, "path": r, "local_path": p} for o, r, p in entries]
+    owners = sorted({o for o, _, _ in entries})
+    return {"repos": repos, "owners": owners, "unmapped": [], "scanned": len(entries)}
+
+
+def test_resolve_scope_unset_mode_is_byte_identical_to_all():
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"),
+                             ("fredericowu", "aw-workspace", "/x/aw-workspace"))
+    unset = gm.resolve_repo_scope(None, discovered)
+    explicit_all = gm.resolve_repo_scope({"mode": "all"}, discovered)
+    assert unset == explicit_all
+    assert unset["mode"] == "all"
+    assert unset["owners"] == ["fredericowu", "tekflox"]
+    assert unset["full_names"] == {"tekflox/aw-app-kb", "fredericowu/aw-workspace"}
+    assert unset["repos"] == discovered["repos"]
+    assert unset["error"] is None
+
+
+def test_resolve_scope_unknown_mode_fails_open_to_all():
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"))
+    resolved = gm.resolve_repo_scope({"mode": "everything"}, discovered)
+    assert resolved["mode"] == "all"
+    assert resolved["owners"] == ["tekflox"]
+
+
+def test_resolve_scope_cloned_is_identical_to_all_today():
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"))
+    all_scope = gm.resolve_repo_scope({"mode": "all"}, discovered)
+    cloned_scope = gm.resolve_repo_scope({"mode": "cloned"}, discovered)
+    assert cloned_scope["owners"] == all_scope["owners"]
+    assert cloned_scope["full_names"] == all_scope["full_names"]
+    assert cloned_scope["repos"] == all_scope["repos"]
+    assert cloned_scope["mode"] == "cloned"  # label differs, coverage doesn't
+
+
+def test_resolve_scope_list_mode_owners_come_from_the_list_not_the_clones():
+    """The real rate-limit/junk win: a list containing only tekflox repos
+    must stop querying fredericowu entirely, even though fredericowu has
+    repos cloned in this workspace."""
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"),
+                             ("fredericowu", "aw-workspace", "/x/aw-workspace"))
+    resolved = gm.resolve_repo_scope({"mode": "list", "list": ["tekflox/aw-app-kb"]}, discovered)
+    assert resolved["owners"] == ["tekflox"]
+    assert resolved["full_names"] == {"tekflox/aw-app-kb"}
+    assert resolved["error"] is None
+
+
+def test_resolve_scope_list_mode_a_cloned_entry_keeps_its_local_path():
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"))
+    resolved = gm.resolve_repo_scope({"mode": "list", "list": ["tekflox/aw-app-kb"]}, discovered)
+    assert resolved["repos"] == [{"owner": "tekflox", "repo": "aw-app-kb",
+                                 "path": "aw-app-kb", "local_path": "/x/aw-app-kb"}]
+
+
+def test_resolve_scope_list_mode_a_non_cloned_entry_gets_local_path_none():
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"))
+    resolved = gm.resolve_repo_scope(
+        {"mode": "list", "list": ["tekflox/aw-app-kb", "someone-else/other-repo"]}, discovered)
+    repos_by_name = {f"{r['owner']}/{r['repo']}": r for r in resolved["repos"]}
+    assert repos_by_name["someone-else/other-repo"]["local_path"] is None
+    assert resolved["owners"] == ["someone-else", "tekflox"]
+
+
+def test_resolve_scope_list_mode_a_duplicate_entry_is_not_double_scanned():
+    """Code-review finding (PR #9): repos was appended once per raw list
+    string with no dedup against the full_names set it builds alongside —
+    a copy-pasted duplicate entry (save_settings enforces no dedup either)
+    scanned the same repo twice, wasting gh api calls and duplicating its
+    entries in failing_flows, undercutting list mode's own rate-limit
+    goal."""
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"))
+    resolved = gm.resolve_repo_scope(
+        {"mode": "list", "list": ["tekflox/aw-app-kb", "tekflox/aw-app-kb"]}, discovered)
+    assert len(resolved["repos"]) == 1
+
+
+def test_resolve_scope_list_mode_empty_list_is_an_in_band_error_not_a_crash():
+    discovered = _discovered(("tekflox", "aw-app-kb", "/x/aw-app-kb"))
+    resolved = gm.resolve_repo_scope({"mode": "list", "list": []}, discovered)
+    assert resolved["mode"] == "list"
+    assert resolved["repos"] == []
+    assert resolved["owners"] == []
+    assert resolved["error"] == "watchlist mode with an empty list"
+
+
 def test_search_sorts_oldest_updated_first_with_a_high_limit():
     captured = {}
 
@@ -535,6 +624,46 @@ def test_scan_repo_failing_workflows_gh_api_failure_is_an_error_not_an_empty(mon
     assert "rate limited" in result["error"]
 
 
+# ── scan_repo_failing_workflows — non-cloned (list mode) remote fallback ──
+# A local_path of None (a list-mode watchlist entry that isn't cloned here)
+# must never reach discover_default_branch — the default branch comes from
+# `gh api repos/{owner}/{repo}` instead.
+
+def test_scan_repo_failing_workflows_non_cloned_entry_resolves_branch_remotely():
+    runner = _fake_runner(api_responses={
+        "repos/tekflox/aw-app-kb": {"default_branch": "main"},
+        "repos/tekflox/aw-app-kb/actions/workflows?per_page=100": {
+            "total_count": 1, "workflows": [{"id": 9, "name": "CI", "state": "active"}]},
+        "repos/tekflox/aw-app-kb/actions/workflows/9/runs?branch=main&per_page=10": {
+            "workflow_runs": [_run(2, workflow_id=9, conclusion="failure")]},
+    })
+    result = asyncio.run(gm.scan_repo_failing_workflows(
+        {"owner": "tekflox", "repo": "aw-app-kb", "local_path": None}, runner))
+    assert result["error"] is None
+    assert result["entries"][0]["default_branch"] == "main"
+
+
+def test_scan_repo_failing_workflows_non_cloned_entry_404_surfaces_as_an_error():
+    """The detection path for a watchlist entry that drifted out from under
+    its stored name (renamed/deleted on GitHub) — never a silent skip."""
+    async def not_found_runner(args):
+        return 1, "", "gh: HTTP 404: Not Found"
+
+    result = asyncio.run(gm.scan_repo_failing_workflows(
+        {"owner": "tekflox", "repo": "renamed-away", "local_path": None}, not_found_runner))
+    assert result["entries"] == []
+    assert "404" in result["error"]
+
+
+def test_remote_default_branch_rejects_a_response_with_no_default_branch_field():
+    async def runner(args):
+        return 0, "{}", ""
+
+    branch, error = asyncio.run(gm._remote_default_branch("tekflox", "aw-app-kb", runner))
+    assert branch is None
+    assert "no default_branch" in error
+
+
 # ── scan_maintenance — full integration, fake gh_runner, no network ─────
 
 def test_scan_maintenance_reports_both_prs_and_failing_flows(tmp_path, monkeypatch):
@@ -616,6 +745,132 @@ def test_scan_maintenance_dry_run_writes_nothing_to_the_store(tmp_path):
     assert not Path(store_path).exists()
 
 
+# ── scan_maintenance — scope wiring (card 4185bf3b-9510-8147) ────────────
+
+def _two_repo_workspace(tmp_path):
+    base = tmp_path / "ws"
+    _init_bare_git_dir(base)
+    _init_bare_git_dir(base / "repos" / "aw-app-kb")
+
+    def git_remote_url(path):
+        if path.endswith("aw-app-kb"):
+            return "git@github.com:tekflox/aw-app-kb.git"
+        return "git@github.com:fredericowu/aw-workspace.git"
+
+    return base, git_remote_url
+
+
+def test_scan_maintenance_scope_none_is_byte_identical_to_the_pre_scope_pipeline(tmp_path, monkeypatch):
+    """HARD backcompat (Architect design §5): a workspace that never
+    configured the setting must scan exactly what it always has."""
+    base, git_remote_url = _two_repo_workspace(tmp_path)
+    monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
+
+    pr = _search_pr(30, updated_hours_ago=30)
+    view = {"statusCheckRollup": [{"status": "COMPLETED", "conclusion": "FAILURE"}],
+           "reviewDecision": "", "mergeable": "MERGEABLE", "isDraft": False, "updatedAt": pr["updatedAt"]}
+
+    def _run_scan(scope):
+        runner = _fake_runner(
+            search_responses={"tekflox": [pr], "fredericowu": []},
+            view_responses={pr["url"]: view},
+            api_responses={
+                "repos/tekflox/aw-app-kb/actions/workflows?per_page=100": {
+                    "total_count": 1, "workflows": [{"id": 1, "name": "CI", "state": "active"}]},
+                "repos/tekflox/aw-app-kb/actions/workflows/1/runs?branch=main&per_page=10": {
+                    "workflow_runs": [_run(1, conclusion="failure")]},
+                "repos/fredericowu/aw-workspace/actions/workflows?per_page=100": {
+                    "total_count": 1, "workflows": [{"id": 2, "name": "CI", "state": "active"}]},
+                "repos/fredericowu/aw-workspace/actions/workflows/2/runs?branch=main&per_page=10": {
+                    "workflow_runs": [_run(1, workflow_id=2, conclusion="success")]},
+            })
+        return asyncio.run(gm.scan_maintenance(
+            now=NOW, gh_runner=runner, base_dir=str(base), git_remote_url=git_remote_url,
+            store_path=str(tmp_path / f"surfaced-{scope}.json"), scope=scope))
+
+    no_scope = _run_scan(None)
+    all_scope = _run_scan({"mode": "all"})
+    assert no_scope["prs"] == all_scope["prs"]
+    assert no_scope["failing_flows"] == all_scope["failing_flows"]
+    assert no_scope["counts"]["mode"] == "all"
+    assert no_scope["counts"]["watched_repos"] == 2
+
+
+def test_scan_maintenance_list_mode_covers_a_non_cloned_entry_too(tmp_path, monkeypatch):
+    base, git_remote_url = _two_repo_workspace(tmp_path)
+    monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
+
+    runner = _fake_runner(
+        search_responses={"someone-else": []},
+        api_responses={
+            "repos/tekflox/aw-app-kb/actions/workflows?per_page=100": {
+                "total_count": 0, "workflows": []},
+            "repos/someone-else/other-repo": {"default_branch": "main"},
+            "repos/someone-else/other-repo/actions/workflows?per_page=100": {
+                "total_count": 1, "workflows": [{"id": 5, "name": "CI", "state": "active"}]},
+            "repos/someone-else/other-repo/actions/workflows/5/runs?branch=main&per_page=10": {
+                "workflow_runs": [_run(1, workflow_id=5, conclusion="failure")]},
+        })
+    result = asyncio.run(gm.scan_maintenance(
+        now=NOW, gh_runner=runner, base_dir=str(base), git_remote_url=git_remote_url,
+        store_path=str(tmp_path / "surfaced.json"),
+        scope={"mode": "list", "list": ["tekflox/aw-app-kb", "someone-else/other-repo"]}))
+
+    assert result["counts"]["mode"] == "list"
+    assert result["counts"]["watched_repos"] == 2
+    assert [f["repo"] for f in result["failing_flows"]] == ["someone-else/other-repo"]
+    # fredericowu/aw-workspace is cloned here but NOT in the list — must not
+    # be searched/swept at all.
+    assert result["counts"]["owners"] == 2
+
+
+def test_scan_maintenance_list_mode_empty_list_is_a_clean_zero_scan_with_an_error(tmp_path):
+    base, git_remote_url = _two_repo_workspace(tmp_path)
+    result = asyncio.run(gm.scan_maintenance(
+        now=NOW, gh_runner=_fake_runner(), base_dir=str(base), git_remote_url=git_remote_url,
+        store_path=str(tmp_path / "surfaced.json"), scope={"mode": "list", "list": []}))
+
+    assert result["prs"] == [] and result["failing_flows"] == []
+    assert result["counts"]["watched_repos"] == 0
+    assert any("empty list" in e["error"] for e in result["errors"])
+
+
+def test_scan_maintenance_narrowing_the_scope_prunes_the_now_unwatched_prs_surfaced_stamp(
+        tmp_path, monkeypatch):
+    """The surfaced store's SET/CLEAR interplay with a scope change
+    (Architect design §5): narrowing scope away from a specific repo, while
+    its OWNER is still searched (another of that owner's repos stays in
+    the list), drops the now-unwatched repo's back-off stamp — the
+    attention filter excludes it from ``open_pr_keys`` even though the
+    search that would have kept its stamp alive still ran. Re-widening
+    would re-surface it once rather than leaving it permanently backed off
+    on stale state."""
+    base, git_remote_url = _two_repo_workspace(tmp_path)
+    monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
+    store_path = str(tmp_path / "surfaced.json")
+
+    pr = _search_pr(99, owner="tekflox", repo="aw-app-kb", updated_hours_ago=30)
+    view = {"statusCheckRollup": [{"status": "COMPLETED", "conclusion": "FAILURE"}],
+           "reviewDecision": "", "mergeable": "MERGEABLE", "isDraft": False, "updatedAt": pr["updatedAt"]}
+    runner = _fake_runner(search_responses={"tekflox": [pr], "fredericowu": []},
+                          view_responses={pr["url"]: view})
+
+    asyncio.run(gm.scan_maintenance(
+        now=NOW, gh_runner=runner, base_dir=str(base), git_remote_url=git_remote_url,
+        store_path=store_path, scope={"mode": "all"}))
+    assert "tekflox/aw-app-kb#99" in gm.load_surfaced_store(store_path)
+
+    # Narrow to a watchlist that still searches "tekflox" (another tekflox
+    # repo stays listed) but no longer watches tekflox/aw-app-kb
+    # specifically — the owner search still runs and returns the same PR,
+    # but the attention filter now drops it before it reaches open_pr_keys.
+    narrow_runner = _fake_runner(search_responses={"tekflox": [pr]}, view_responses={pr["url"]: view})
+    asyncio.run(gm.scan_maintenance(
+        now=NOW, gh_runner=narrow_runner, base_dir=str(base), git_remote_url=git_remote_url,
+        store_path=store_path, scope={"mode": "list", "list": ["tekflox/other-repo"]}))
+    assert "tekflox/aw-app-kb#99" not in gm.load_surfaced_store(store_path)
+
+
 # ── MaintenanceWatchdog — cache shape, never dies on a scan failure ─────
 
 def test_watchdog_poll_populates_the_cache_from_a_successful_scan(tmp_path, monkeypatch):
@@ -673,6 +928,39 @@ def test_watchdog_poll_never_raises_on_an_unreadable_repos_dir_and_records_the_e
     assert cached["last_poll"] == NOW
     assert cached["error"] is not None
     assert "unreadable" in cached["error"]
+
+
+def test_watchdog_poll_reads_the_scope_fn_each_poll(tmp_path, monkeypatch):
+    """A changed setting must take effect on the NEXT poll — the watchdog
+    must call scope_fn() per poll, not cache a stale scope from construction
+    time."""
+    base = tmp_path / "ws"
+    _init_bare_git_dir(base)
+    _init_bare_git_dir(base / "repos" / "aw-app-kb")
+    monkeypatch.setattr(github_prs, "discover_default_branch", lambda path: "origin/main")
+
+    pr = _search_pr(60, owner="tekflox", repo="aw-app-kb", updated_hours_ago=30)
+    view = {"statusCheckRollup": [{"status": "COMPLETED", "conclusion": "FAILURE"}],
+           "reviewDecision": "", "mergeable": "MERGEABLE", "isDraft": False, "updatedAt": pr["updatedAt"]}
+    runner = _fake_runner(search_responses={"tekflox": [pr], "fredericowu": []},
+                          view_responses={pr["url"]: view})
+
+    scope = {"mode": "all"}
+    wd = gm.MaintenanceWatchdog(
+        base_dir=str(base), store_path=str(tmp_path / "surfaced.json"), gh_runner=runner,
+        git_remote_url=lambda p: ("git@github.com:tekflox/aw-app-kb.git" if p.endswith("aw-app-kb")
+                                  else "git@github.com:fredericowu/aw-workspace.git"),
+        scope_fn=lambda: scope)
+
+    asyncio.run(wd.poll(now=NOW))
+    assert len(wd.get_cached()["prs"]) == 1
+    assert wd.get_cached()["counts"]["mode"] == "all"
+
+    scope = {"mode": "list", "list": ["fredericowu/aw-workspace"]}
+    asyncio.run(wd.poll(now=NOW + 1))
+    cached = wd.get_cached()
+    assert cached["counts"]["mode"] == "list"
+    assert cached["prs"] == []  # tekflox/aw-app-kb is no longer watched
 
 
 # ── ping-gate planning (pure — route-level slice) ───────────────────────

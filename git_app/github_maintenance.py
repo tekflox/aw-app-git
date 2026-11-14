@@ -255,6 +255,79 @@ def filter_prs_to_cloned_repos(prs: list, cloned_full_names: "set[str]") -> list
     return out
 
 
+# ── repo-scope resolution (settings-page watchlist, card 4185bf3b-9510-8147) ─
+
+def resolve_repo_scope(scope: "dict | None", discovered: dict) -> dict:
+    """Pure. Resolves the settings-page repo-scope setting (``{"mode":
+    "all"|"cloned"|"list", "list": [...]}``) against what
+    :func:`discover_github_repos` found, into the shape both sweeps
+    consume: ``{"mode", "owners", "full_names", "repos", "error"}`` —
+    ``owners`` for Phase A's owner-scoped search, ``full_names`` for the PR
+    attention filter, ``repos`` for the failing-workflow sweep.
+
+    Unset, or an unrecognized mode, fails open to ``"all"`` — BYTE-IDENTICAL
+    to the pre-scope pipeline, so a workspace that never configured this
+    setting keeps scanning exactly what it always has.
+
+    ``"all"`` and ``"cloned"`` are deliberately identical today: the
+    attention filter already clamps Phase A's owner-wide search down to the
+    discovered universe, so there is no wider "every repo the owners have
+    on GitHub" universe to fall back to (Architect design §0/§1). Both use
+    the full discovered universe as-is.
+
+    ``"list"`` replaces the universe with exactly the configured
+    ``owner/repo`` entries: Phase A only searches the owners actually
+    present in the list (the real rate-limit/junk win over owner-wide
+    search), the attention filter keeps only those full names, and the
+    workflow sweep iterates the list — an entry that matches a discovered
+    repo keeps its ``local_path`` (so :func:`scan_repo_failing_workflows`
+    resolves the default branch locally); an entry that doesn't gets
+    ``local_path: None`` (that function's remote ``gh api`` fallback
+    handles it). An empty list is reported in ``error`` rather than
+    silently scanning nothing with no explanation."""
+    discovered_repos = discovered.get("repos") or []
+    by_full_name = {f"{r['owner']}/{r['repo']}": r for r in discovered_repos}
+
+    mode = (scope or {}).get("mode")
+    if mode not in ("all", "cloned", "list"):
+        mode = "all"
+
+    if mode in ("all", "cloned"):
+        return {
+            "mode": mode,
+            "owners": list(discovered.get("owners") or []),
+            "full_names": set(by_full_name),
+            "repos": discovered_repos,
+            "error": None,
+        }
+
+    entries = [str(e).strip() for e in ((scope or {}).get("list") or []) if str(e).strip()]
+    if not entries:
+        return {"mode": "list", "owners": [], "full_names": set(), "repos": [],
+                "error": "watchlist mode with an empty list"}
+
+    repos: list = []
+    owners: set = set()
+    full_names: set = set()
+    for entry in entries:
+        if "/" not in entry:
+            continue
+        owner, repo_name = entry.split("/", 1)
+        if not owner or not repo_name:
+            continue
+        full_name = f"{owner}/{repo_name}"
+        if full_name in full_names:
+            continue  # a duplicate list entry must not double-scan the repo
+        full_names.add(full_name)
+        owners.add(owner)
+        existing = by_full_name.get(full_name)
+        repos.append(existing if existing is not None
+                     else {"owner": owner, "repo": repo_name, "local_path": None})
+
+    return {"mode": "list", "owners": sorted(owners), "full_names": full_names,
+           "repos": repos, "error": None}
+
+
 # ── gh calls (PR sweep) ──────────────────────────────────────────────────
 
 async def search_open_prs_for_owner(owner: str, gh_runner: GhRunner) -> "tuple[list | None, str | None]":
@@ -629,12 +702,36 @@ async def fetch_workflow_runs(owner: str, repo: str, workflow_id: Any, branch: s
     return (runs or []), None
 
 
+async def _remote_default_branch(owner: str, repo_name: str,
+                                 gh_runner: GhRunner) -> "tuple[str | None, str | None]":
+    """Default branch via ``gh api repos/{owner}/{repo}`` — the fallback for
+    a ``list``-mode watchlist entry that isn't cloned into this workspace,
+    so its workflow sweep doesn't depend on a local checkout existing. A 404
+    (renamed/deleted repo) or malformed response lands in ``error``, not a
+    silent skip — this is the detection path for a watchlist entry that has
+    drifted out from under its stored name (Architect design §7b)."""
+    code, out, err = await gh_runner(["api", f"repos/{owner}/{repo_name}"])
+    if code != 0:
+        return None, (err or out or f"gh api repos/{owner}/{repo_name} exited {code}").strip()
+    try:
+        data = json.loads(out or "{}")
+    except ValueError as exc:
+        return None, f"malformed gh api output: {exc}"
+    branch = (data.get("default_branch") if isinstance(data, dict) else None) or None
+    if not branch:
+        return None, f"repos/{owner}/{repo_name}: no default_branch in response"
+    return branch, None
+
+
 async def scan_repo_failing_workflows(repo: dict, gh_runner: GhRunner) -> dict:
     """One repo's slice of the failing-workflow sweep. ``repo`` is one of
-    :func:`discover_github_repos`'s mapped entries (``owner``/``repo``/
-    ``local_path``). Default branch is discovered from the LOCAL checkout
-    (``github_prs.discover_default_branch``, a ``git`` call, not ``gh``) —
-    unresolved is reported as an error, never silently skipped.
+    :func:`discover_github_repos`'s mapped entries, or a ``list``-mode
+    watchlist entry (``owner``/``repo``/``local_path``, ``local_path`` may
+    be ``None`` for a non-cloned watchlist entry). Default branch is
+    discovered from the LOCAL checkout when one exists
+    (``github_prs.discover_default_branch``, a ``git`` call, not ``gh``);
+    otherwise via :func:`_remote_default_branch`. Either way, unresolved is
+    reported as an error, never silently skipped.
 
     One ``gh api`` call per ACTIVE workflow (not one combined call for the
     whole repo) — code-review finding: a single ``.../actions/runs``
@@ -648,10 +745,16 @@ async def scan_repo_failing_workflows(repo: dict, gh_runner: GhRunner) -> dict:
     """
     owner, repo_name, local_path = repo["owner"], repo["repo"], repo.get("local_path")
     full_name = f"{owner}/{repo_name}"
-    default_ref = await asyncio.to_thread(github_prs.discover_default_branch, local_path or "")
-    if not default_ref:
-        return {"repo": full_name, "error": "could not resolve a default branch", "entries": []}
-    branch = default_ref.split("/", 1)[1] if "/" in default_ref else default_ref
+    if local_path:
+        default_ref = await asyncio.to_thread(github_prs.discover_default_branch, local_path)
+        if not default_ref:
+            return {"repo": full_name, "error": "could not resolve a default branch", "entries": []}
+        branch = default_ref.split("/", 1)[1] if "/" in default_ref else default_ref
+    else:
+        branch, branch_error = await _remote_default_branch(owner, repo_name, gh_runner)
+        if branch_error is not None:
+            return {"repo": full_name, "error": f"gh api repos/{owner}/{repo_name} failed: "
+                    f"{branch_error}", "entries": []}
 
     workflows, error, truncated = await list_workflows(owner, repo_name, gh_runner)
     if error is not None:
@@ -686,11 +789,14 @@ async def scan_maintenance(*, now: float, gh_runner: GhRunner = default_gh_runne
                            git_remote_url: "Callable[[str], str | None]" = _git_remote_url,
                            stall_hours: float = DEFAULT_STALL_HOURS,
                            concurrency: int = GH_MAX_CONCURRENCY,
-                           store_path: "str | None" = None, dry_run: bool = False) -> dict:
-    """The full scan: repo discovery, the PR attention sweep, the
-    failing-workflow sweep, and the surfaced-stamp store write (skipped on
-    ``dry_run``). Returns ``{prs, failing_flows, counts, errors,
-    repos_unmapped}`` — the shape the gate route (next slice) and
+                           store_path: "str | None" = None, dry_run: bool = False,
+                           scope: "dict | None" = None) -> dict:
+    """The full scan: repo discovery, the settings-page repo-scope
+    resolution (:func:`resolve_repo_scope` — ``scope=None`` or an unset/
+    unknown mode is byte-identical to the pre-scope pipeline), the PR
+    attention sweep, the failing-workflow sweep, and the surfaced-stamp
+    store write (skipped on ``dry_run``). Returns ``{prs, failing_flows,
+    counts, errors, repos_unmapped}`` — the shape the gate route and
     :class:`MaintenanceWatchdog` both read as-is."""
     store_path = store_path or default_store_path()
     discovered = await asyncio.to_thread(discover_github_repos, base_dir=base_dir,
@@ -701,10 +807,14 @@ async def scan_maintenance(*, now: float, gh_runner: GhRunner = default_gh_runne
     if discovered.get("error"):
         errors.append({"owner": None, "error": discovered["error"]})
 
+    resolved = resolve_repo_scope(scope, discovered)
+    if resolved["error"]:
+        errors.append({"owner": None, "error": resolved["error"]})
+
     store = load_surfaced_store(store_path)
     pr_result = await scan_pr_attention(
-        now=now, gh_runner=gh_runner, cloned_full_names=set(repos_by_full_name),
-        owners=discovered["owners"], store=store, stall_hours=stall_hours, concurrency=concurrency)
+        now=now, gh_runner=gh_runner, cloned_full_names=resolved["full_names"],
+        owners=resolved["owners"], store=store, stall_hours=stall_hours, concurrency=concurrency)
     errors.extend(pr_result["errors"])
 
     if not dry_run:
@@ -713,7 +823,7 @@ async def scan_maintenance(*, now: float, gh_runner: GhRunner = default_gh_runne
         save_surfaced_store(store_path, pruned)
 
     workflow_results = await _bounded_gather(
-        list(repos_by_full_name.values()),
+        resolved["repos"],
         lambda repo: scan_repo_failing_workflows(repo, gh_runner),
         concurrency=concurrency)
 
@@ -733,6 +843,8 @@ async def scan_maintenance(*, now: float, gh_runner: GhRunner = default_gh_runne
             "mapped_repos": len(repos_by_full_name),
             "failing_flows": len(failing_flows),
             "truncated": bool(pr_result["counts"]["truncated_owners"]),
+            "mode": resolved["mode"],
+            "watched_repos": len(resolved["repos"]),
         },
         "errors": errors,
         "repos_unmapped": discovered["unmapped"],
@@ -750,13 +862,15 @@ class MaintenanceWatchdog:
     def __init__(self, *, base_dir: "str | None" = None, store_path: "str | None" = None,
                  gh_runner: GhRunner = default_gh_runner,
                  git_remote_url: "Callable[[str], str | None]" = _git_remote_url,
-                 stall_hours: float = DEFAULT_STALL_HOURS, concurrency: int = GH_MAX_CONCURRENCY):
+                 stall_hours: float = DEFAULT_STALL_HOURS, concurrency: int = GH_MAX_CONCURRENCY,
+                 scope_fn: "Callable[[], dict] | None" = None):
         self._base_dir = base_dir
         self._store_path = store_path
         self._gh_runner = gh_runner
         self._git_remote_url = git_remote_url
         self._stall_hours = stall_hours
         self._concurrency = concurrency
+        self._scope_fn = scope_fn
         self._cache: dict = {
             "prs": [], "failing_flows": [], "counts": {}, "errors": [],
             "last_poll": 0, "error": None,
@@ -768,11 +882,12 @@ class MaintenanceWatchdog:
     async def poll(self, now: "float | None" = None) -> None:
         now = now if now is not None else time.time()
         try:
+            scope = self._scope_fn() if self._scope_fn is not None else None
             result = await scan_maintenance(
                 now=now, gh_runner=self._gh_runner, base_dir=self._base_dir,
                 git_remote_url=self._git_remote_url,
                 stall_hours=self._stall_hours, concurrency=self._concurrency,
-                store_path=self._store_path)
+                store_path=self._store_path, scope=scope)
             self._cache["prs"] = result["prs"]
             self._cache["failing_flows"] = result["failing_flows"]
             self._cache["counts"] = result["counts"]
@@ -787,9 +902,9 @@ class MaintenanceWatchdog:
 
 __all__ = [
     "GhRunner", "default_gh_runner", "parse_github_remote", "map_cloned_repos",
-    "discover_github_repos", "filter_prs_to_cloned_repos", "search_open_prs_for_owner",
-    "view_pr", "surfaced_backoff_state", "load_surfaced_store", "save_surfaced_store",
-    "prune_surfaced_store", "default_store_path", "scan_pr_attention",
+    "discover_github_repos", "filter_prs_to_cloned_repos", "resolve_repo_scope",
+    "search_open_prs_for_owner", "view_pr", "surfaced_backoff_state", "load_surfaced_store",
+    "save_surfaced_store", "prune_surfaced_store", "default_store_path", "scan_pr_attention",
     "analyze_workflow_runs", "scan_repo_failing_workflows", "scan_maintenance",
     "MaintenanceWatchdog", "DEFAULT_STALL_HOURS", "SURFACE_BACKOFF_CEILING_HOURS",
     "DEFAULT_POLL_INTERVAL_S", "ATTENTION_BADGES",

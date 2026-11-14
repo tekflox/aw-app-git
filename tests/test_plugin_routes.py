@@ -7,6 +7,7 @@ Run: .venv/aw/bin/python -m pytest tests/test_plugin_routes.py
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -227,6 +228,99 @@ def test_device_poll_access_denied(client, monkeypatch):
     monkeypatch.setattr(device_flow, "poll", lambda client_id, device_code: {"status": "access_denied"})
     resp = tc.post("/device/poll")
     assert resp.json()["status"] == "access_denied"
+
+
+# ---- maintenance-scan watchlist settings (card 4185bf3b-9510-8147) ------
+
+def test_maintenance_scope_defaults_to_all_with_no_settings_saved():
+    ctx = FakeCtx()
+    assert plugin._maintenance_scope(ctx) == {"mode": "all", "list": []}
+    assert plugin._maintenance_scope_text(ctx) == "all repos"
+
+
+def test_maintenance_scope_mode_precedence_secret_over_config():
+    ctx = FakeCtx(config={"maintenance_repo_mode": "cloned"})
+    assert plugin._maintenance_scope(ctx)["mode"] == "cloned"
+    ctx.secrets.write("maintenance_repo_mode", "list")
+    assert plugin._maintenance_scope(ctx)["mode"] == "list"
+
+
+def test_maintenance_scope_unknown_mode_fails_open_to_all():
+    ctx = FakeCtx()
+    ctx.secrets.write("maintenance_repo_mode", "everything")
+    assert plugin._maintenance_scope(ctx)["mode"] == "all"
+
+
+def test_maintenance_scope_list_accepts_json_array_or_comma_split():
+    ctx = FakeCtx()
+    ctx.secrets.write("maintenance_repo_list", json.dumps(["tekflox/aw-app-git"]))
+    assert plugin._maintenance_scope(ctx)["list"] == ["tekflox/aw-app-git"]
+
+    ctx2 = FakeCtx()
+    ctx2.secrets.write("maintenance_repo_list", "tekflox/aw-app-git, fredericowu/aw-workspace")
+    assert plugin._maintenance_scope(ctx2)["list"] == ["tekflox/aw-app-git", "fredericowu/aw-workspace"]
+
+
+def test_settings_saves_a_valid_maintenance_repo_mode(client):
+    tc, ctx = client
+    resp = tc.post("/settings", json={"maintenance_repo_mode": "list"})
+    body = resp.json()
+    assert body["maintenance_repo_mode"] == "list"
+    assert "maintenance_repo_mode_error" not in body
+    assert ctx.secrets.read("maintenance_repo_mode") == "list"
+
+
+def test_settings_rejects_an_invalid_maintenance_repo_mode(client):
+    tc, ctx = client
+    resp = tc.post("/settings", json={"maintenance_repo_mode": "everything"})
+    body = resp.json()
+    assert body["maintenance_repo_mode_error"] == "must be one of: all, cloned, list"
+    assert ctx.secrets.read("maintenance_repo_mode") is None
+
+
+def test_settings_saves_a_valid_maintenance_repo_list_as_json(client):
+    tc, ctx = client
+    resp = tc.post("/settings", json={
+        "maintenance_repo_list": "tekflox/aw-app-git, fredericowu/aw-workspace"})
+    body = resp.json()
+    assert body["maintenance_repo_list"] == ["tekflox/aw-app-git", "fredericowu/aw-workspace"]
+    assert json.loads(ctx.secrets.read("maintenance_repo_list")) == [
+        "tekflox/aw-app-git", "fredericowu/aw-workspace"]
+
+
+def test_settings_rejects_an_invalid_maintenance_repo_list_entry_by_name(client):
+    tc, ctx = client
+    resp = tc.post("/settings", json={
+        "maintenance_repo_list": "tekflox/aw-app-git, not-an-owner-repo-entry"})
+    body = resp.json()
+    assert "not-an-owner-repo-entry" in body["maintenance_repo_list_error"]
+    assert ctx.secrets.read("maintenance_repo_list") is None
+
+
+def test_settings_empty_maintenance_repo_list_clears_it(client):
+    tc, ctx = client
+    ctx.secrets.write("maintenance_repo_list", json.dumps(["tekflox/aw-app-git"]))
+    resp = tc.post("/settings", json={"maintenance_repo_list": ""})
+    body = resp.json()
+    assert body["maintenance_repo_list"] == []
+    assert json.loads(ctx.secrets.read("maintenance_repo_list")) == []
+
+
+def test_status_reports_the_current_maintenance_scope_text(client, monkeypatch):
+    tc, ctx = client
+    monkeypatch.setattr(gh_auth, "whoami", lambda: {"login": "octocat"})
+    assert tc.get("/status").json()["maintenance_scope_text"] == "all repos"
+
+    ctx.secrets.write("maintenance_repo_mode", "list")
+    ctx.secrets.write("maintenance_repo_list", json.dumps(["tekflox/aw-app-git"]))
+    text = tc.get("/status").json()["maintenance_scope_text"]
+    assert text == "list (1): tekflox/aw-app-git"
+
+
+def test_status_reports_maintenance_scope_text_even_when_logged_out(client, monkeypatch):
+    tc, _ = client
+    monkeypatch.setattr(gh_auth, "whoami", lambda: None)
+    assert tc.get("/status").json()["maintenance_scope_text"] == "all repos"
 
 
 def test_status_logged_in(client, monkeypatch):

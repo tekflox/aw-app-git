@@ -27,7 +27,7 @@
           "type": "auth_status",
           "bind": "GET /api/apps/git/status",
           "loading_text": "",
-          "logged_in_text": "Credential: `{token_masked}` · {token_kind}\n\nCommits authored as **{git_user_name}** &lt;{git_user_email}&gt;\n\nAccess: {scopes_text}",
+          "logged_in_text": "Credential: `{token_masked}` · {token_kind}\n\nCommits authored as **{git_user_name}** &lt;{git_user_email}&gt;\n\nAccess: {scopes_text}\n\nMaintenance scan scope: {maintenance_scope_text}",
           "logged_out_text": ""
         }
       ]
@@ -111,6 +111,46 @@
                   "label": "Personal access token",
                   "input": "password",
                   "placeholder": "ghp_… / github_pat_…"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "maintenance-scope",
+      "widgets": [
+        {
+          "type": "collapsible",
+          "title": "Maintenance scan scope",
+          "collapsed": true,
+          "widgets": [
+            {
+              "type": "markdown",
+              "value": "Controls which repos the GitHub Maintenance scan (PR attention + failing-workflow sweeps) covers.\n\n- **all** — every repo discovered in this workspace (today's default).\n- **cloned** — repos actually cloned here. Currently identical coverage to **all** — the scan already clamps to cloned repos; pick this to pin your intent in case that ever changes.\n- **list** — only the `owner/repo` entries below, whether or not they're cloned here.\n\nA scope change takes effect on the next scan tick (up to ~30 min)."
+            },
+            {
+              "type": "form",
+              "id": "maintenance_scope_settings",
+              "submit": {
+                "call": "POST /api/apps/git/settings"
+              },
+              "submit_label": "Save",
+              "fields": [
+                {
+                  "key": "maintenance_repo_mode",
+                  "label": "Scope",
+                  "input": "select",
+                  "options": ["all", "cloned", "list"],
+                  "default": "all"
+                },
+                {
+                  "key": "maintenance_repo_list",
+                  "label": "Watched repos (owner/repo, comma-separated)",
+                  "input": "text",
+                  "placeholder": "tekflox/aw-app-git, fredericowu/aw-workspace",
+                  "visible_when": {"field": "maintenance_repo_mode", "equals": "list"}
                 }
               ]
             }

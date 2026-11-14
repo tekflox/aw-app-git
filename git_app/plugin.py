@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -47,6 +48,10 @@ log = logging.getLogger("aw_apps.git")
 # framework doesn't merge config_schema defaults into ctx.config on install,
 # so this fallback is what actually makes that true for a fresh install.
 DEFAULT_OAUTH_CLIENT_ID = "Ov23liWR67ZgY2P6fYKh"
+
+# One owner/repo entry in the maintenance-scan watchlist (POST /settings'
+# maintenance_repo_list validation, and the settings-page form).
+_REPO_ENTRY_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
 def _watchdog_enabled(ctx) -> bool:
@@ -115,6 +120,62 @@ def _github_poll_interval_s(ctx) -> float:
     except (TypeError, ValueError):
         interval = github_prs.DEFAULT_POLL_INTERVAL
     return max(interval, 60.0)
+
+
+def _maintenance_scope(ctx) -> dict:
+    """The GitHub Maintenance scan's repo-scope setting ({"mode", "list"}).
+
+    Same ``ctx.secrets``-with-``ctx.config``-fallback precedence as
+    :func:`_github_team`, including its JSON-array-or-comma-split leniency
+    for the list field — unset or unrecognized mode fails open to
+    ``"all"``, same invariant :func:`github_maintenance.resolve_repo_scope`
+    enforces on the other side of this value.
+    """
+    mode = (
+        ctx.secrets.read("maintenance_repo_mode")
+        or (getattr(ctx, "config", {}) or {}).get("maintenance_repo_mode")
+        or "all"
+    )
+    mode = str(mode).strip().lower()
+    if mode not in ("all", "cloned", "list"):
+        mode = "all"
+
+    raw = ctx.secrets.read("maintenance_repo_list")
+    if raw is None:
+        raw = (getattr(ctx, "config", {}) or {}).get("maintenance_repo_list")
+    if isinstance(raw, list):
+        entries = [str(m).strip() for m in raw if str(m).strip()]
+    elif not raw:
+        entries = []
+    else:
+        text = str(raw).strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                entries = ([str(m).strip() for m in parsed if str(m).strip()]
+                          if isinstance(parsed, list) else [])
+            except json.JSONDecodeError:
+                log.warning("maintenance_repo_list is not valid JSON — falling back to comma-split")
+                entries = [m.strip() for m in text.split(",") if m.strip()]
+        else:
+            entries = [m.strip() for m in text.split(",") if m.strip()]
+
+    return {"mode": mode, "list": entries}
+
+
+def _maintenance_scope_text(ctx) -> str:
+    """Human-readable current scope for the settings panel's signed-in
+    detail widget — no repo discovery here, just the stored setting."""
+    scope = _maintenance_scope(ctx)
+    mode = scope["mode"]
+    if mode == "list":
+        entries = scope["list"]
+        if not entries:
+            return "list — empty, scanning nothing until repos are added"
+        return f"list ({len(entries)}): {', '.join(entries)}"
+    if mode == "cloned":
+        return "cloned repos only (currently identical coverage to \"all\")"
+    return "all repos"
 
 
 def _oauth_client_id(ctx) -> str:
@@ -280,7 +341,8 @@ class GitAppPlugin:
         existing = getattr(self, "_maintenance", None)
         if existing is not None:
             return existing
-        self._maintenance = github_maintenance.MaintenanceWatchdog()
+        self._maintenance = github_maintenance.MaintenanceWatchdog(
+            scope_fn=lambda: _maintenance_scope(ctx))
         return self._maintenance
 
     def _build_routes(self, ctx):
@@ -502,6 +564,8 @@ class GitAppPlugin:
                     "failing_flows": len(failing_flows),
                     "scanned_repos": counts.get("scanned_repos", 0),
                     "truncated": bool(counts.get("truncated")),
+                    "mode": counts.get("mode", "all"),
+                    "watched_repos": counts.get("watched_repos", 0),
                 },
             }
             if ping:
@@ -649,6 +713,31 @@ class GitAppPlugin:
                     result["github_poll_interval_s"] = float(data["github_poll_interval_s"])
                 except (TypeError, ValueError):
                     result["github_poll_interval_s_error"] = "must be a number"
+            if "maintenance_repo_mode" in data:
+                mode = str(data.get("maintenance_repo_mode") or "").strip().lower()
+                if mode in ("all", "cloned", "list"):
+                    ctx.secrets.write("maintenance_repo_mode", mode)
+                    result["maintenance_repo_mode"] = mode
+                else:
+                    result["maintenance_repo_mode_error"] = "must be one of: all, cloned, list"
+            if "maintenance_repo_list" in data:
+                raw = data.get("maintenance_repo_list")
+                if isinstance(raw, list):
+                    candidates = [str(m).strip() for m in raw if str(m).strip()]
+                else:
+                    candidates = [m.strip() for m in str(raw or "").split(",") if m.strip()]
+                if not candidates:
+                    # Empty string/list = clear the watchlist.
+                    ctx.secrets.write("maintenance_repo_list", json.dumps([]))
+                    result["maintenance_repo_list"] = []
+                else:
+                    bad = [c for c in candidates if not _REPO_ENTRY_RE.match(c)]
+                    if bad:
+                        result["maintenance_repo_list_error"] = (
+                            f"invalid owner/repo entries: {', '.join(bad)}")
+                    else:
+                        ctx.secrets.write("maintenance_repo_list", json.dumps(candidates))
+                        result["maintenance_repo_list"] = candidates
             oauth_client_id = (data.get("oauth_client_id") or "").strip()
             if oauth_client_id:
                 ctx.secrets.write("oauth_client_id", oauth_client_id)
@@ -697,6 +786,7 @@ class GitAppPlugin:
                     "token_masked": "—",
                     "token_kind": "—",
                     "scopes_text": "—",
+                    "maintenance_scope_text": _maintenance_scope_text(ctx),
                 }
 
             # A secret input renders blank whether or not something is saved,
@@ -722,6 +812,7 @@ class GitAppPlugin:
                 "scopes_text": scopes_text,
                 "git_user_name": identity.get("user.name") or "—",
                 "git_user_email": identity.get("user.email") or "—",
+                "maintenance_scope_text": _maintenance_scope_text(ctx),
             }
 
         @api.post("/logout")
