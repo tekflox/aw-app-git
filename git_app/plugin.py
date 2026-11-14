@@ -284,7 +284,7 @@ class GitAppPlugin:
         return self._maintenance
 
     def _build_routes(self, ctx):
-        from fastapi import Body, FastAPI
+        from fastapi import Body, FastAPI, Query
         from fastapi.responses import JSONResponse
 
         api = FastAPI()
@@ -350,53 +350,79 @@ class GitAppPlugin:
         # GET /kanban/cards-need-attention.
         maintenance = self._maintenance_watchdog(ctx)
 
-        def _ping_maintenance(failing_flows: list) -> dict:
+        def _ping_maintenance(failing_flows: list) -> "dict | None":
             """The reping pattern: pure decision logic lives in
             ``github_maintenance.plan_maintenance_pings`` (testable without
             ``ctx`` or a filesystem); this does the I/O that function can't
             — notifying and persisting the SET/CLEAR + daily-summary state.
             Called ONLY when ``ping=true`` (see ``get_maintenance`` below)
-            — a plain GET never reaches this function."""
+            — a plain GET never reaches this function.
+
+            Any failure here (the notify backend down, a state-file write
+            error) is caught and reported as ``None`` rather than raised —
+            code-review finding (PR #7 round 2): this is a best-effort
+            side-channel on top of an already-successfully-computed
+            has_work/prs/counts response, and must never turn that healthy
+            read into a 500 the way the route's own deliberate 502 (``cached
+            .get("error")``) is reserved for an actually broken scan."""
             state_path = github_maintenance.default_ping_state_path()
-            # Generic atomic JSON-dict load/save — the same helper the
-            # surfaced-PR back-off store uses, just pointed at a different
-            # file (this route's own ping-gate state, not the scan's).
-            state = github_maintenance.load_surfaced_store(state_path)
-            plan = github_maintenance.plan_maintenance_pings(failing_flows, state, _now_s())
-
             try:
-                notify = ctx.notify if ctx.has("notifications:send") else None
-            except AttributeError:
-                notify = None  # a ctx without the facade (tests) — no notifications
+                # Lock held for the FULL load → decide → notify → write
+                # cycle (code-review finding, PR #7 round 2) — a lock
+                # around only load/save still lets two concurrent callers
+                # each independently decide the same flow is "new" before
+                # either persists.
+                with github_maintenance.locked_store(state_path):
+                    state = github_maintenance.load_surfaced_store(state_path)
+                    now_ts = _now_s()
+                    plan = github_maintenance.plan_maintenance_pings(failing_flows, state, now_ts)
 
-            if notify is not None:
-                for flow in plan["new_failures"]:
-                    notify(
-                        message=f"{flow.get('workflow')} failing on {flow.get('repo')} "
-                                f"({flow.get('consecutive_failures', 0)} consecutive run(s))",
-                        level="error",
-                        title="GitHub workflow failing",
-                        url=flow.get("latest_run_url") or "",
-                        external_id=f"ci:{github_maintenance.flow_key(flow)}",
-                        external_status="failing",
-                    )
-                if plan["summary_due"]:
-                    names = ", ".join(github_maintenance.flow_key(f) for f in failing_flows[:10])
-                    notify(
-                        message=f"{len(failing_flows)} failing workflow(s): {names}",
-                        level="warning",
-                        title="GitHub Maintenance — daily summary",
-                        external_status="summary",
-                    )
+                    try:
+                        notify = ctx.notify if ctx.has("notifications:send") else None
+                    except AttributeError:
+                        notify = None  # a ctx without the facade (tests) — no notifications
 
-            github_maintenance.save_surfaced_store(state_path, plan["state"])
+                    if notify is not None:
+                        for flow in plan["new_failures"]:
+                            # external_id folds in the SET's own timestamp —
+                            # code-review finding (PR #7 round 1/2 HIGH): the
+                            # real NotificationDB.has_notification dedups on
+                            # the bare (source, external_id, external_status)
+                            # triple FOREVER (its only purge is a one-time
+                            # 7-day cleanup at process boot), so a constant
+                            # id per flow key would silently swallow every
+                            # notify after the first real occurrence —
+                            # defeating the whole SET/CLEAR/re-notify design
+                            # this route exists to ship.
+                            notify(
+                                message=f"{flow.get('workflow')} failing on {flow.get('repo')} "
+                                        f"({flow.get('consecutive_failures', 0)} consecutive run(s))",
+                                level="error",
+                                title="GitHub workflow failing",
+                                url=flow.get("latest_run_url") or "",
+                                external_id=f"ci:{github_maintenance.flow_key(flow)}:{int(now_ts)}",
+                                external_status="failing",
+                            )
+                        if plan["summary_due"]:
+                            names = ", ".join(github_maintenance.flow_key(f) for f in failing_flows[:10])
+                            notify(
+                                message=f"{len(failing_flows)} failing workflow(s): {names}",
+                                level="warning",
+                                title="GitHub Maintenance — daily summary",
+                                external_status="summary",
+                            )
+
+                    github_maintenance.save_surfaced_store(state_path, plan["state"])
+            except Exception:
+                log.exception("github maintenance ping (notify/persist) failed")
+                return None
             return {
                 "instant_sent": [github_maintenance.flow_key(f) for f in plan["new_failures"]],
                 "daily_summary_sent": bool(plan["summary_due"]),
             }
 
         @api.get("/github/maintenance")
-        async def get_maintenance(limit: int = 20, ping: bool = False):
+        async def get_maintenance(limit: int = Query(20, ge=0), ping: bool = False):
             """Sync gate on the GitHub Maintenance scan cache. ``has_work``
             = any attention PR OR any failing flow. Non-2xx when the scan
             layer itself is broken (a top-level ``scan_maintenance``
@@ -438,7 +464,9 @@ class GitAppPlugin:
                 },
             }
             if ping:
-                result["pings"] = _ping_maintenance(failing_flows)
+                pings = _ping_maintenance(failing_flows)
+                if pings is not None:
+                    result["pings"] = pings
             return result
 
         @api.websocket("/github/stream")

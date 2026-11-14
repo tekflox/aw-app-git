@@ -50,7 +50,9 @@ next slice reads :meth:`MaintenanceWatchdog.get_cached` to build the gate.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import logging
 import os
@@ -332,6 +334,26 @@ def default_ping_state_path() -> str:
 
 def flow_key(flow: dict) -> str:
     return f"{flow.get('repo')}:{flow.get('workflow')}"
+
+
+@contextlib.contextmanager
+def locked_store(path: str):
+    """Advisory, CROSS-PROCESS lock (``fcntl.flock``, the same primitive
+    the core server uses for its own leader lease — ``src/api/app.py``)
+    serializing a full load → decide → notify → write cycle against
+    ``path``. Held for the WHOLE critical section, not just the write:
+    code-review finding (PR #7 round 2) — a lock around only load/save
+    still lets two concurrent callers each independently decide the same
+    flow is a "new failure" (both read the same prior state before either
+    writes) and both fire a notification for it."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    with open(path + ".lock", "a+") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
 def plan_maintenance_pings(failing_flows: list, state: dict, now: float, *,
@@ -769,5 +791,5 @@ __all__ = [
     "MaintenanceWatchdog", "DEFAULT_STALL_HOURS", "SURFACE_BACKOFF_CEILING_HOURS",
     "DEFAULT_POLL_INTERVAL_S", "ATTENTION_BADGES",
     "default_ping_state_path", "flow_key", "plan_maintenance_pings",
-    "DEFAULT_PING_SUMMARY_INTERVAL_HOURS",
+    "DEFAULT_PING_SUMMARY_INTERVAL_HOURS", "locked_store",
 ]
