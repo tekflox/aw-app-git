@@ -92,3 +92,39 @@ def test_github_maintenance_watchdog_skipped_without_capability():
     asyncio.run(app.activate(ctx))
 
     assert "github_maintenance" not in ctx.watchdog.calls
+
+
+def test_github_maintenance_warmup_jitters_then_polls_the_same_cache(monkeypatch):
+    """PR #10 round 2 (code review): bare run_immediately=True fires all
+    AW_WORKSPACE_WORKERS=10 workers' first scans in the same instant — a
+    guaranteed 10x-simultaneous GitHub API burst on every deploy. The
+    registered fn must sleep a jittered delay (bounded by
+    MAINTENANCE_WARMUP_JITTER_S) before polling, not poll immediately."""
+    ctx = _FakeCtx(capabilities={"watchdog:tasks"})
+    app = plugin.GitAppPlugin()
+
+    # Pre-create the lazy singleton so it's the SAME object the registered
+    # fn polls — matches how the real route handler and watchdog share one
+    # MaintenanceWatchdog per worker (see _maintenance_watchdog's docstring).
+    maintenance = app._maintenance_watchdog(ctx)
+    poll_calls = []
+
+    async def fake_poll():
+        poll_calls.append(True)
+
+    monkeypatch.setattr(maintenance, "poll", fake_poll)
+
+    sleep_calls = []
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(plugin.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(plugin.random, "uniform", lambda a, b: b)  # deterministic
+
+    asyncio.run(app.activate(ctx))
+    registered_fn = ctx.watchdog.calls["github_maintenance"]["fn"]
+    asyncio.run(registered_fn())
+
+    assert sleep_calls == [plugin.MAINTENANCE_WARMUP_JITTER_S]
+    assert poll_calls == [True]

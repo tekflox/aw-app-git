@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import time
@@ -52,6 +53,12 @@ DEFAULT_OAUTH_CLIENT_ID = "Ov23liWR67ZgY2P6fYKh"
 # One owner/repo entry in the maintenance-scan watchlist (POST /settings'
 # maintenance_repo_list validation, and the settings-page form).
 _REPO_ENTRY_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+# How wide a window to spread the GitHub Maintenance watchdog's deploy-
+# triggered first run across (card 4185bf3b-9510-8132, PR #10 round 2) — see
+# the registration comment in activate() for why bare run_immediately=True
+# alone would turn every deploy into a 10x-simultaneous GitHub API burst.
+MAINTENANCE_WARMUP_JITTER_S = 60.0
 
 
 def _watchdog_enabled(ctx) -> bool:
@@ -334,8 +341,25 @@ class GitAppPlugin:
             # not inline here. It just means each worker starts warming its
             # own cache the moment it activates, instead of waiting on
             # inbound traffic timing or a 30-minute clock.
+            #
+            # Jittered (code-review finding, PR #10 round 2): bare
+            # run_immediately=True fires all AW_WORKSPACE_WORKERS=10
+            # workers' first scans in the same instant, turning a deploy
+            # into a guaranteed 10x-simultaneous ~38s GitHub API burst right
+            # when deploy/reconcile load is already elevated. Spreading that
+            # first run across MAINTENANCE_WARMUP_JITTER_S desynchronizes
+            # the 10 workers while still closing the cold-cache window in
+            # well under a minute — nowhere near the 30-minute wait
+            # run_immediately=False left on the table. Only the FIRST run is
+            # delayed this way; the recurring cadence below is unaffected.
+            maintenance = self._maintenance_watchdog(ctx)
+
+            async def _warm_maintenance_cache() -> None:
+                await asyncio.sleep(random.uniform(0, MAINTENANCE_WARMUP_JITTER_S))
+                await maintenance.poll()
+
             ctx.watchdog.register(
-                "github_maintenance", self._maintenance_watchdog(ctx).poll,
+                "github_maintenance", _warm_maintenance_cache,
                 lambda: github_maintenance.DEFAULT_POLL_INTERVAL_S,
                 run_immediately=True,
             )
