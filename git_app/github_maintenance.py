@@ -340,12 +340,15 @@ def flow_key(flow: dict) -> str:
 def locked_store(path: str):
     """Advisory, CROSS-PROCESS lock (``fcntl.flock``, the same primitive
     the core server uses for its own leader lease — ``src/api/app.py``)
-    serializing a full load → decide → notify → write cycle against
-    ``path``. Held for the WHOLE critical section, not just the write:
-    code-review finding (PR #7 round 2) — a lock around only load/save
-    still lets two concurrent callers each independently decide the same
+    serializing a load → decide → write cycle against ``path``. Held for
+    load through write, never for the caller's own post-decision notify
+    (card 4185bf3b-9510-816d — a lock spanning a blocking notify call
+    serialized every concurrent ``ping=true`` caller behind it until the
+    HTTP client's own timeout tripped). A lock around only load/save would
+    still let two concurrent callers each independently decide the same
     flow is a "new failure" (both read the same prior state before either
-    writes) and both fire a notification for it."""
+    writes) and both fire a notification for it — the write must stay
+    inside this lock for that reason, even though notify no longer does."""
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     with open(path + ".lock", "a+") as lock_fh:

@@ -256,7 +256,7 @@ def test_instant_notify_external_id_is_unique_per_set_occurrence_not_per_flow(se
     assert instant_ids[0] != instant_ids[1]  # same flow, different occurrence → different id
 
 
-def test_a_notify_failure_is_swallowed_not_a_500_and_pings_is_omitted(setup, monkeypatch):
+def test_a_notify_failure_is_swallowed_not_a_500_and_not_reported_as_sent(setup, monkeypatch):
     tc, app, ctx, _ = setup
     _warm(app, failing_flows=[_flow()])
 
@@ -268,7 +268,126 @@ def test_a_notify_failure_is_swallowed_not_a_500_and_pings_is_omitted(setup, mon
     assert resp.status_code == 200
     body = resp.json()
     assert body["has_work"] is True  # the primary read still succeeds
-    assert "pings" not in body
+    # The state write already landed (prevents a double-decide race with any
+    # concurrent caller), but a notify that raised must not be reported as
+    # delivered — see the rollback tests below for the retry-on-failure half
+    # of this contract (card 4185bf3b-9510-816d).
+    assert body["pings"]["instant_sent"] == []
+    assert body["pings"]["daily_summary_sent"] is False
+
+
+def test_an_instant_notify_failure_rolls_back_so_the_next_tick_retries(setup, monkeypatch):
+    """Card 4185bf3b-9510-816d, round 1 code-review finding: notify now runs
+    AFTER the state-file lock is released (to stop a slow notify backend
+    from serializing every concurrent ping=true caller behind the same
+    fcntl.flock — see the lock-release test below). Committing the decided
+    state BEFORE notify is attempted would otherwise mean a notify that
+    *raises* gets permanently treated as delivered, with no retry. This
+    proves the rollback: a failed instant notify untracks that flow so the
+    NEXT tick decides it as new again instead of silently dropping it."""
+    tc, app, ctx, notify_calls = setup
+    _warm(app, failing_flows=[_flow()])
+
+    def boom(**kw):
+        raise RuntimeError("notification backend is down")
+
+    ctx.notify = boom
+    body = tc.get("/github/maintenance?ping=true").json()
+    assert body["pings"]["instant_sent"] == []
+
+    # Backend recovered — the same still-failing flow is retried as new.
+    notify_calls.clear()
+    ctx.notify = lambda **kw: notify_calls.append(kw) or {"ok": True}
+    body2 = tc.get("/github/maintenance?ping=true").json()
+    assert "o/r:ci" in body2["pings"]["instant_sent"]
+    assert any(c.get("external_status") == "failing" for c in notify_calls)
+
+
+def test_a_daily_summary_notify_failure_rolls_back_so_it_retries(setup, monkeypatch):
+    """Same rollback contract as the instant-notify test above, for the
+    OTHER notify this route can send: a failed daily-summary notify must
+    not stamp ``last_summary_at``, or the retry would wait out the full 24h
+    for a summary that was never actually delivered."""
+    tc, app, ctx, notify_calls = setup
+    _warm(app, failing_flows=[_flow()])
+
+    def selective_boom(**kw):
+        if kw.get("external_status") == "summary":
+            raise RuntimeError("notification backend is down")
+        notify_calls.append(kw)
+        return {"ok": True}
+
+    ctx.notify = selective_boom
+    body = tc.get("/github/maintenance?ping=true").json()
+    assert body["pings"]["instant_sent"] == ["o/r:ci"]  # instant delivered fine
+    assert body["pings"]["daily_summary_sent"] is False  # summary failed
+
+    # Same still-failing flow, backend recovered: instant doesn't re-fire
+    # (already tracked), but the summary retries since last_summary_at was
+    # rolled back instead of stamped on a delivery that never happened.
+    notify_calls.clear()
+    ctx.notify = lambda **kw: notify_calls.append(kw) or {"ok": True}
+    body2 = tc.get("/github/maintenance?ping=true").json()
+    assert body2["pings"]["instant_sent"] == []
+    assert body2["pings"]["daily_summary_sent"] is True
+
+
+def test_ping_true_releases_the_state_lock_before_calling_notify(setup):
+    """Root regression for card 4185bf3b-9510-816d: the live route hung
+    under repeated real calls while ping=false stayed fast. Confirmed by
+    reading the code — notify() used to run INSIDE the same fcntl.flock
+    guarding the ping state file, so a slow/blocking notify backend (a
+    synchronous Postgres write, in the real NotificationManager) serialized
+    every concurrent ping=true caller behind it until the HTTP client's own
+    timeout tripped. Reproduces the hang mechanism directly: a fake notify
+    that blocks until released, and a non-blocking probe on the SAME lock
+    file while that notify is in flight."""
+    import fcntl
+    import threading
+
+    tc, app, ctx, notify_calls = setup
+    _warm(app, failing_flows=[_flow()])
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_notify(**kw):
+        notify_calls.append(kw)
+        started.set()
+        release.wait(timeout=5.0)
+        return {"ok": True}
+
+    ctx.notify = blocking_notify
+    result: dict = {}
+
+    def _call():
+        resp = tc.get("/github/maintenance?ping=true")
+        result["status_code"] = resp.status_code
+
+    thread = threading.Thread(target=_call, daemon=True)
+    thread.start()
+    try:
+        assert started.wait(timeout=5.0), "notify was never called — ping=true didn't take the notify path"
+
+        lock_path = github_maintenance.default_ping_state_path() + ".lock"
+        with open(lock_path, "a+") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_free = False
+            else:
+                lock_free = True
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        assert lock_free, (
+            "the ping state lock is still held while notify() is in flight — "
+            "notify is running inside the fcntl.flock critical section again"
+        )
+    finally:
+        release.set()
+        thread.join(timeout=5.0)
+
+    assert not thread.is_alive(), "the /github/maintenance request never finished"
+    assert result["status_code"] == 200
 
 
 def test_a_state_file_write_failure_is_swallowed_not_a_500(setup, monkeypatch):

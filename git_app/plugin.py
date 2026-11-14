@@ -364,26 +364,50 @@ class GitAppPlugin:
             side-channel on top of an already-successfully-computed
             has_work/prs/counts response, and must never turn that healthy
             read into a 500 the way the route's own deliberate 502 (``cached
-            .get("error")``) is reserved for an actually broken scan."""
+            .get("error")``) is reserved for an actually broken scan.
+
+            The lock guards ONLY load → decide → write (card
+            4185bf3b-9510-816d): ``notify`` fires AFTER it's released, so a
+            slow/blocking notify backend stalls just this one call instead
+            of serializing every concurrent ``ping=true`` caller behind the
+            same ``fcntl.flock``. This doesn't reopen the SET/CLEAR race the
+            lock exists for — by the time any other caller can acquire the
+            lock, this call's ``save_surfaced_store`` has already persisted
+            the decided state, so a concurrent decide always sees it.
+
+            Retry-on-notify-failure (code-review finding, this card, round
+            1): committing the decided state BEFORE notify is attempted
+            would otherwise mean a notify that *raises* (not just one
+            that's slow — e.g. the backend's Postgres write failing
+            outright) gets permanently treated as delivered, with no retry
+            on the next poll. Each notify call below is caught
+            individually and, if it raised, its flow key (or the summary
+            stamp) is rolled back in a SECOND, short lock acquisition —
+            no slow I/O inside it — so the next ``ping=true`` call decides
+            that flow as "new" again instead of silently dropping it. The
+            rollback itself can't reopen the SET/CLEAR race: any other
+            caller that decided concurrently already saw this flow as
+            tracked from this call's first save, so no one double-fires
+            for it before the rollback runs."""
             state_path = github_maintenance.default_ping_state_path()
             try:
-                # Lock held for the FULL load → decide → notify → write
-                # cycle (code-review finding, PR #7 round 2) — a lock
-                # around only load/save still lets two concurrent callers
-                # each independently decide the same flow is "new" before
-                # either persists.
                 with github_maintenance.locked_store(state_path):
                     state = github_maintenance.load_surfaced_store(state_path)
                     now_ts = _now_s()
                     plan = github_maintenance.plan_maintenance_pings(failing_flows, state, now_ts)
+                    github_maintenance.save_surfaced_store(state_path, plan["state"])
 
-                    try:
-                        notify = ctx.notify if ctx.has("notifications:send") else None
-                    except AttributeError:
-                        notify = None  # a ctx without the facade (tests) — no notifications
+                try:
+                    notify = ctx.notify if ctx.has("notifications:send") else None
+                except AttributeError:
+                    notify = None  # a ctx without the facade (tests) — no notifications
 
-                    if notify is not None:
-                        for flow in plan["new_failures"]:
+                failed_keys = []
+                summary_failed = False
+                if notify is not None:
+                    for flow in plan["new_failures"]:
+                        flow_key = github_maintenance.flow_key(flow)
+                        try:
                             # external_id folds in the SET's own timestamp —
                             # code-review finding (PR #7 round 1/2 HIGH): the
                             # real NotificationDB.has_notification dedups on
@@ -400,25 +424,42 @@ class GitAppPlugin:
                                 level="error",
                                 title="GitHub workflow failing",
                                 url=flow.get("latest_run_url") or "",
-                                external_id=f"ci:{github_maintenance.flow_key(flow)}:{int(now_ts)}",
+                                external_id=f"ci:{flow_key}:{int(now_ts)}",
                                 external_status="failing",
                             )
-                        if plan["summary_due"]:
-                            names = ", ".join(github_maintenance.flow_key(f) for f in failing_flows[:10])
+                        except Exception:
+                            log.exception("github maintenance ping: instant notify failed for %s", flow_key)
+                            failed_keys.append(flow_key)
+                    if plan["summary_due"]:
+                        names = ", ".join(github_maintenance.flow_key(f) for f in failing_flows[:10])
+                        try:
                             notify(
                                 message=f"{len(failing_flows)} failing workflow(s): {names}",
                                 level="warning",
                                 title="GitHub Maintenance — daily summary",
                                 external_status="summary",
                             )
+                        except Exception:
+                            log.exception("github maintenance ping: daily summary notify failed")
+                            summary_failed = True
 
-                    github_maintenance.save_surfaced_store(state_path, plan["state"])
+                if failed_keys or summary_failed:
+                    with github_maintenance.locked_store(state_path):
+                        current = github_maintenance.load_surfaced_store(state_path)
+                        failing = dict(current.get("failing") or {})
+                        for flow_key in failed_keys:
+                            failing.pop(flow_key, None)
+                        current["failing"] = failing
+                        if summary_failed:
+                            current["last_summary_at"] = state.get("last_summary_at")
+                        github_maintenance.save_surfaced_store(state_path, current)
             except Exception:
                 log.exception("github maintenance ping (notify/persist) failed")
                 return None
             return {
-                "instant_sent": [github_maintenance.flow_key(f) for f in plan["new_failures"]],
-                "daily_summary_sent": bool(plan["summary_due"]),
+                "instant_sent": [github_maintenance.flow_key(f) for f in plan["new_failures"]
+                                  if github_maintenance.flow_key(f) not in failed_keys],
+                "daily_summary_sent": bool(plan["summary_due"]) and not summary_failed,
             }
 
         @api.get("/github/maintenance")
