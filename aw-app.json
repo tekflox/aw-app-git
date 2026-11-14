@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "git",
   "name": "Git + GitHub CLI",
-  "version": "0.24.1",
+  "version": "0.25.0",
   "description": "Installs git and the GitHub CLI (gh) into the workspace, survives restarts, provides a settings panel for gh login (token stored in the zero-knowledge secret store), and serves the GitHub PR dashboard (open PRs for you and your team, plus repo status) the workspace nav reads.",
   "tier": "inprocess",
   "publisher": "TekFlox",
@@ -100,7 +100,11 @@
       },
       "maintenance_repo_mode": {
         "type": "string",
-        "enum": ["all", "cloned", "list"],
+        "enum": [
+          "all",
+          "cloned",
+          "list"
+        ],
         "default": "all",
         "description": "GitHub Maintenance scan: which repos the PR-attention and failing-workflow sweeps cover. \"all\" and \"cloned\" currently have identical coverage (the scan already clamps to repos cloned into this workspace); \"list\" restricts the scan to the repos below."
       },
