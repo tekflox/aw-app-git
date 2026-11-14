@@ -29,7 +29,7 @@ import subprocess
 # param gets mistaken for a required query field (close 1008 on connect).
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import device_flow, gh_auth, github_prs, uncommitted_watchdog
+from . import device_flow, gh_auth, github_maintenance, github_prs, uncommitted_watchdog
 
 log = logging.getLogger("aw_apps.git")
 
@@ -233,6 +233,18 @@ class GitAppPlugin:
             )
             log.info("aw-app-git: GitHub PR watchdog registered")
 
+        if ctx.has("watchdog:tasks"):
+            # The GitHub Maintenance Plan's scan layer (card 4185bf3b-9510-8121)
+            # — owner-scoped PR attention + default-branch failing-workflow
+            # sweep, cached the same way as the "github" watchdog above. No
+            # route reads this cache yet; that's the next slice.
+            ctx.watchdog.register(
+                "github_maintenance", self._maintenance_watchdog(ctx).poll,
+                lambda: github_maintenance.DEFAULT_POLL_INTERVAL_S,
+                run_immediately=False,
+            )
+            log.info("aw-app-git: GitHub maintenance watchdog registered")
+
     async def deactivate(self) -> None:
         # git + gh removal is driven by the framework's journal reverse-replay
         # (scripts/uninstall.sh); the secret namespace is purged by the runtime.
@@ -252,6 +264,16 @@ class GitAppPlugin:
 
         self._prs = github_prs.PrWatchdog(lambda: _github_cfg(ctx), notify=notify)
         return self._prs
+
+    def _maintenance_watchdog(self, ctx):
+        """The GitHub Maintenance scan's poller — same lazy-singleton shape
+        as :meth:`_pr_watchdog`, built fresh (not wrapping ``PrWatchdog``:
+        its ``@me``-authored discovery is wrong for maintenance)."""
+        existing = getattr(self, "_maintenance", None)
+        if existing is not None:
+            return existing
+        self._maintenance = github_maintenance.MaintenanceWatchdog()
+        return self._maintenance
 
     def _build_routes(self, ctx):
         from fastapi import Body, FastAPI
