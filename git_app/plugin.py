@@ -305,12 +305,39 @@ class GitAppPlugin:
         if ctx.has("watchdog:tasks"):
             # The GitHub Maintenance Plan's scan layer (card 4185bf3b-9510-8121)
             # — owner-scoped PR attention + default-branch failing-workflow
-            # sweep, cached the same way as the "github" watchdog above. No
-            # route reads this cache yet; that's the next slice.
+            # sweep, cached the same way as the "github" watchdog above, and
+            # read synchronously by GET /github/maintenance (card
+            # 4185bf3b-9510-81c5).
+            #
+            # run_immediately=True (card 4185bf3b-9510-8132): a full sweep
+            # over the discovered repo universe is NOT the "several gh
+            # calls" the "github" watchdog's comment above warns about — at
+            # AW_WORKSPACE_WORKERS=10 it measured ~38s against this
+            # workspace's ~90-repo universe. MaintenanceWatchdog's cache is
+            # per-worker-process (``self._maintenance`` on this plugin
+            # instance), and activate() re-runs on EVERY worker on every
+            # deploy/reconcile — confirmed live, 10 activate/deactivate
+            # pairs within the same deploy. With run_immediately=True, all
+            # 10 workers' caches went cold simultaneously and only warmed on
+            # the next real request to land on each one (an unlucky one
+            # eating the full ~38s scan inline) or after this task's own
+            # 30-minute first-tick delay — whichever came first. The
+            # github-maintenance dag Workflow's http gate node, which has a
+            # ~10s client timeout, hit that cold window twice in a row right
+            # after a deploy and got a connection-level timeout
+            # (status_code: null) both times.
+            #
+            # run_immediately=True does NOT block this activate() call or
+            # boot reconcile: WatchdogSupervisor.register() (src/apps/
+            # watchdog.py) only ever does `asyncio.ensure_future(self._run
+            # (t))` — the first poll runs as an independent background task,
+            # not inline here. It just means each worker starts warming its
+            # own cache the moment it activates, instead of waiting on
+            # inbound traffic timing or a 30-minute clock.
             ctx.watchdog.register(
                 "github_maintenance", self._maintenance_watchdog(ctx).poll,
                 lambda: github_maintenance.DEFAULT_POLL_INTERVAL_S,
-                run_immediately=False,
+                run_immediately=True,
             )
             log.info("aw-app-git: GitHub maintenance watchdog registered")
 
